@@ -1,0 +1,367 @@
+*===============================================================================
+* REGRESSION: IWP Employees vs. AROP w/o IWP - 2018-2024
+* MIT KONTROLLVARIABLEN
+*
+* Modell 1: Basis - nur iwp_group + Year-FE
+* Modell 2: + Alter + Geschlecht
+* Modell 3: + Alter + Geschlecht + HH-Typ
+*
+* Änderungen ggü. Vorversion:
+*   1. AROP w/o IWP Referenzgruppe auf 18-64 beschränkt
+*   2. Drei Modellspezifikationen für Robustness
+*   3. Kontrollvariablen: Alter (stetig + quadriert), Geschlecht, HH-Typ
+*===============================================================================
+
+use "D:\Data\AT_CROSS\SILC_CrossSec_AllYears_2015_2024.dta", clear
+
+global output "D:\InWorkPoverty_SILC"
+
+*--- Destring ---
+foreach var in HX090 HY023 HX050 RB050 RX010 PL073 PL074 PL075 PL076 year PL040 PL040A PB150 PD020 PD030 PD050 PD060 PD070 PD080 HS040 HS050 HS060 HS011 HS021 HS031 HH050 RX060 {
+    capture confirm variable `var'
+    if _rc == 0 {
+        capture confirm string variable `var'
+        if _rc == 0 {
+            replace `var' = subinstr(`var', ",", ".", .)
+            destring `var', replace force
+        }
+    }
+}
+
+*--- Grundvariablen ---
+gen dwt = RB050
+gen age = RX010
+
+gen months_worked = 0
+foreach var in PL073 PL074 PL075 PL076 {
+    capture confirm variable `var'
+    if _rc == 0 replace months_worked = months_worked + `var' if !missing(`var')
+}
+replace months_worked = 12 if months_worked > 12 & !missing(months_worked)
+
+drop if missing(HX090) | missing(dwt) | missing(age)
+keep if inrange(year, 2018, 2024)
+
+*--- Sex (PB150, konsistent mit allen anderen Do-Files) ---
+capture confirm variable PB150
+if _rc == 0 {
+    gen sex = PB150
+    label define sex_lbl 1 "Male" 2 "Female"
+    label values sex sex_lbl
+}
+else {
+    gen sex = .
+}
+
+*--- Erwerbsstatus ---
+gen emp_status = .
+replace emp_status = PL040  if inrange(year, 2015, 2020)
+replace emp_status = PL040A if inrange(year, 2021, 2024)
+
+*--- Armutsschwelle ---
+tempfile thr
+tempname h
+postfile `h' int year double pov_threshold_60 using `thr', replace
+levelsof year, local(yrs)
+foreach yr of local yrs {
+    quietly _pctile HX090 [pw=dwt] if year==`yr', p(50)
+    post `h' (`yr') (0.60 * r(r1))
+}
+postclose `h'
+merge m:1 year using `thr', nogen keep(1 3)
+
+*--- Armutsstatus ---
+gen arop_post        = (HX090 < pov_threshold_60) if !missing(pov_threshold_60)
+gen worker           = (months_worked > 6 & age >= 18 & age <= 64)
+gen inwork_poor_post = (worker == 1 & arop_post == 1)
+gen axi_post         = (arop_post == 1 & inwork_poor_post == 0)
+gen iwp_emp_post     = (inwork_poor_post == 1 & emp_status == 3)
+
+*--- Gruppe & Sample (18-64 für beide Gruppen) ---
+gen byte iwp_group = .
+replace iwp_group = 0 if axi_post == 1 & age >= 18 & age <= 64
+replace iwp_group = 1 if iwp_emp_post == 1
+label define grp 0 "AROP w/o IWP (18-64)" 1 "IWP Employees"
+label values iwp_group grp
+
+gen sample = (!missing(iwp_group))
+
+*--- Deprivationsvariablen ---
+gen dep_clothes  = (PD020 == 2) if !missing(PD020)
+gen dep_shoes    = (PD030 == 2) if !missing(PD030)
+gen dep_social   = (PD050 == 2) if !missing(PD050)
+gen dep_leisure  = (PD060 == 2) if !missing(PD060)
+gen dep_pocket   = (PD070 == 2) if !missing(PD070)
+gen dep_internet = (PD080 == 2) if !missing(PD080)
+gen dep_holiday  = (HS040 == 2) if !missing(HS040)
+gen dep_meat     = (HS050 == 2) if !missing(HS050)
+gen dep_unexp    = (HS060 == 2) if !missing(HS060)
+gen dep_rent     = (HS011 == 1) if !missing(HS011)
+gen dep_util     = (HS021 == 1) if !missing(HS021)
+gen dep_loan     = (HS031 == 1) if !missing(HS031)
+gen dep_warm     = (HH050 == 2) if !missing(HH050)
+gen dep_smd      = (RX060 == 1) if !missing(RX060)
+
+*--- HH-Typ ---
+capture confirm variable id_hh
+if _rc == 0 {
+    gen hh_id = id_hh
+}
+else {
+    capture confirm variable HB030
+    if _rc == 0 {
+        gen hh_id = HB030
+    }
+    else {
+        gen hh_id = DB030
+    }
+}
+
+bysort year hh_id: egen n_adults   = total(age >= 14)
+bysort year hh_id: egen n_children = total(age < 14)
+bysort year hh_id: egen hh_size    = count(hh_id)
+
+gen hh_type = .
+replace hh_type = 1 if n_adults == 1 & n_children == 0
+replace hh_type = 2 if n_adults == 1 & n_children == 1
+replace hh_type = 3 if n_adults == 1 & n_children >= 2
+replace hh_type = 4 if n_adults == 2 & n_children == 0
+replace hh_type = 5 if n_adults == 2 & n_children == 1
+replace hh_type = 6 if n_adults == 2 & n_children == 2
+replace hh_type = 7 if n_adults == 2 & n_children >= 3
+replace hh_type = 8 if n_adults >= 3 & n_children == 0
+replace hh_type = 9 if n_adults >= 3 & n_children >= 1
+
+label define hh_type_lbl 1 "1E" 2 "1E+1K" 3 "1E+2+K" 4 "2E" 5 "2E+1K" 6 "2E+2K" 7 "2E+3+K" 8 "3+E" 9 "3+E+K"
+label values hh_type hh_type_lbl
+
+*--- Kontrollvariablen ---
+gen age_sq = age^2
+label variable age_sq "Age squared"
+
+gen byte has_children = (n_children > 0)
+label variable has_children "Household has children (<14)"
+
+label variable n_children "Number of children in HH"
+
+*--- svyset ---
+svyset [pw=dwt], vce(linearized)
+
+*===============================================================================
+* DESKRIPTIVE STATISTIK DER ANALYSEGRUPPEN
+*===============================================================================
+di _n "================================================================="
+di "=== DESKRIPTIVE STATISTIK DER ANALYSEGRUPPEN ==="
+di "=================================================================" _n
+
+di "Stichprobengröße:"
+tab iwp_group if sample == 1
+
+di _n "Alter:"
+svy, subpop(sample): mean age, over(iwp_group)
+
+di _n "Geschlecht:"
+svy, subpop(sample): tab sex iwp_group, col
+
+di _n "Haushaltstyp:"
+tab hh_type iwp_group if sample == 1, col
+
+di _n "Anzahl Kinder:"
+svy, subpop(sample): mean n_children, over(iwp_group)
+
+*===============================================================================
+* DEPRIVATIONSLISTE
+*===============================================================================
+
+local dep_all "dep_smd dep_clothes dep_shoes dep_social dep_leisure dep_pocket dep_internet dep_holiday dep_meat dep_unexp dep_rent dep_util dep_loan dep_warm"
+
+*===============================================================================
+* MODELL 1: BASIS (nur iwp_group + Year-FE)
+*===============================================================================
+di _n "================================================================="
+di "=== MODELL 1: BASIS (iwp_group + Year-FE) ==="
+di "=================================================================" _n
+
+foreach depvar of local dep_all {
+    di _n "--- M1: `depvar' ---"
+    capture svy, subpop(sample): logistic `depvar' i.iwp_group ib2018.year
+    if _rc == 0 {
+        est store m1_`depvar'
+    }
+    else {
+        di as error "M1 `depvar': Schätzung fehlgeschlagen"
+    }
+}
+
+di _n "=== MODELL 1 ZUSAMMENFASSUNG ==="
+esttab m1_dep_smd m1_dep_clothes m1_dep_shoes m1_dep_social m1_dep_leisure m1_dep_pocket m1_dep_internet m1_dep_holiday m1_dep_meat m1_dep_unexp m1_dep_rent m1_dep_util m1_dep_loan m1_dep_warm, eform ci nostar keep(1.iwp_group) coeflabels(1.iwp_group "OR: IWP Emp vs. AROP w/o IWP") title("Modell 1: Basis (Year-FE)")
+
+esttab m1_dep_smd m1_dep_clothes m1_dep_shoes m1_dep_social m1_dep_leisure m1_dep_pocket m1_dep_internet m1_dep_holiday m1_dep_meat m1_dep_unexp m1_dep_rent m1_dep_util m1_dep_loan m1_dep_warm using "$output/Regression_M1_Basis.csv", eform ci nostar replace keep(1.iwp_group) title("Modell 1: Basis") note("OR mit 95% KI. Ref: AROP w/o IWP (18-64). Year-FE (Ref: 2018). svy-gewichtet.")
+
+estimates clear
+
+*===============================================================================
+* MODELL 2: + ALTER + GESCHLECHT
+*===============================================================================
+di _n "================================================================="
+di "=== MODELL 2: + ALTER + GESCHLECHT ==="
+di "=================================================================" _n
+
+foreach depvar of local dep_all {
+    di _n "--- M2: `depvar' ---"
+    capture svy, subpop(sample): logistic `depvar' i.iwp_group c.age c.age_sq i.sex ib2018.year
+    if _rc == 0 {
+        est store m2_`depvar'
+    }
+    else {
+        di as error "M2 `depvar': Schätzung fehlgeschlagen"
+    }
+}
+
+di _n "=== MODELL 2 ZUSAMMENFASSUNG ==="
+esttab m2_dep_smd m2_dep_clothes m2_dep_shoes m2_dep_social m2_dep_leisure m2_dep_pocket m2_dep_internet m2_dep_holiday m2_dep_meat m2_dep_unexp m2_dep_rent m2_dep_util m2_dep_loan m2_dep_warm, eform ci nostar keep(1.iwp_group) coeflabels(1.iwp_group "OR: IWP Emp vs. AROP w/o IWP") title("Modell 2: + Alter + Geschlecht")
+
+esttab m2_dep_smd m2_dep_clothes m2_dep_shoes m2_dep_social m2_dep_leisure m2_dep_pocket m2_dep_internet m2_dep_holiday m2_dep_meat m2_dep_unexp m2_dep_rent m2_dep_util m2_dep_loan m2_dep_warm using "$output/Regression_M2_AlterSex.csv", eform ci nostar replace keep(1.iwp_group) title("Modell 2: + Alter + Geschlecht") note("OR mit 95% KI. Kontrolliert fuer Alter, Alter2, Geschlecht, Year-FE. svy-gewichtet.")
+
+* Vollständiges Modell für dep_smd als Beispiel
+di _n "=== MODELL 2 VOLLSTÄNDIG (Beispiel: dep_smd) ==="
+estimates restore m2_dep_smd
+esttab m2_dep_smd, eform ci nostar coeflabels(1.iwp_group "IWP Employees" age "Alter" age_sq "Alter2" 2.sex "Weiblich") title("Modell 2 vollstaendig: SMD")
+
+estimates clear
+
+*===============================================================================
+* MODELL 3: + ALTER + GESCHLECHT + HH-TYP
+* Referenz HH-Typ: ib4 = 2 Erwachsene ohne Kinder
+*===============================================================================
+di _n "================================================================="
+di "=== MODELL 3: + ALTER + GESCHLECHT + HH-TYP ==="
+di "=================================================================" _n
+
+foreach depvar of local dep_all {
+    di _n "--- M3: `depvar' ---"
+    capture svy, subpop(sample): logistic `depvar' i.iwp_group c.age c.age_sq i.sex ib4.hh_type ib2018.year
+    if _rc == 0 {
+        est store m3_`depvar'
+    }
+    else {
+        di as error "M3 `depvar': Schätzung fehlgeschlagen"
+    }
+}
+
+di _n "=== MODELL 3 ZUSAMMENFASSUNG ==="
+esttab m3_dep_smd m3_dep_clothes m3_dep_shoes m3_dep_social m3_dep_leisure m3_dep_pocket m3_dep_internet m3_dep_holiday m3_dep_meat m3_dep_unexp m3_dep_rent m3_dep_util m3_dep_loan m3_dep_warm, eform ci nostar keep(1.iwp_group) coeflabels(1.iwp_group "OR: IWP Emp vs. AROP w/o IWP") title("Modell 3: + Alter + Geschlecht + HH-Typ")
+
+esttab m3_dep_smd m3_dep_clothes m3_dep_shoes m3_dep_social m3_dep_leisure m3_dep_pocket m3_dep_internet m3_dep_holiday m3_dep_meat m3_dep_unexp m3_dep_rent m3_dep_util m3_dep_loan m3_dep_warm using "$output/Regression_M3_Voll.csv", eform ci nostar replace keep(1.iwp_group) title("Modell 3: + Alter + Geschlecht + HH-Typ") note("OR mit 95% KI. Kontrolliert fuer Alter, Alter2, Geschlecht, HH-Typ (Ref: 2E oK), Year-FE. svy-gewichtet.")
+
+* Vollständiges Modell für dep_smd als Beispiel
+di _n "=== MODELL 3 VOLLSTÄNDIG (Beispiel: dep_smd) ==="
+estimates restore m3_dep_smd
+esttab m3_dep_smd, eform ci nostar title("Modell 3 vollstaendig: SMD")
+
+estimates clear
+
+*===============================================================================
+* MODELLVERGLEICH: OR für iwp_group über alle 3 Modelle
+* Zeigt Stabilität des Effekts über Spezifikationen
+*===============================================================================
+di _n "================================================================="
+di "=== MODELLVERGLEICH: Stabilität des IWP-Effekts ==="
+di "=================================================================" _n
+
+* SMD
+di _n "--- Severe Material Deprivation ---"
+svy, subpop(sample): logistic dep_smd i.iwp_group ib2018.year
+est store comp_m1
+svy, subpop(sample): logistic dep_smd i.iwp_group c.age c.age_sq i.sex ib2018.year
+est store comp_m2
+svy, subpop(sample): logistic dep_smd i.iwp_group c.age c.age_sq i.sex ib4.hh_type ib2018.year
+est store comp_m3
+
+esttab comp_m1 comp_m2 comp_m3, eform ci nostar keep(1.iwp_group) mtitles("Basis" "+Alter/Sex" "+HH-Typ") coeflabels(1.iwp_group "OR: IWP Emp") title("Modellvergleich: SMD")
+estimates clear
+
+* Holiday
+di _n "--- Urlaub ---"
+svy, subpop(sample): logistic dep_holiday i.iwp_group ib2018.year
+est store comp_m1
+svy, subpop(sample): logistic dep_holiday i.iwp_group c.age c.age_sq i.sex ib2018.year
+est store comp_m2
+svy, subpop(sample): logistic dep_holiday i.iwp_group c.age c.age_sq i.sex ib4.hh_type ib2018.year
+est store comp_m3
+
+esttab comp_m1 comp_m2 comp_m3, eform ci nostar keep(1.iwp_group) mtitles("Basis" "+Alter/Sex" "+HH-Typ") coeflabels(1.iwp_group "OR: IWP Emp") title("Modellvergleich: Urlaub")
+estimates clear
+
+* Unerwartete Ausgaben
+di _n "--- Unerwartete Ausgaben ---"
+svy, subpop(sample): logistic dep_unexp i.iwp_group ib2018.year
+est store comp_m1
+svy, subpop(sample): logistic dep_unexp i.iwp_group c.age c.age_sq i.sex ib2018.year
+est store comp_m2
+svy, subpop(sample): logistic dep_unexp i.iwp_group c.age c.age_sq i.sex ib4.hh_type ib2018.year
+est store comp_m3
+
+esttab comp_m1 comp_m2 comp_m3, eform ci nostar keep(1.iwp_group) mtitles("Basis" "+Alter/Sex" "+HH-Typ") coeflabels(1.iwp_group "OR: IWP Emp") title("Modellvergleich: Unerwartete Ausgaben")
+estimates clear
+
+*===============================================================================
+* KOMBINIERTE VERGLEICHSTABELLE FÜR ALLE DEPRIVATIONEN
+*===============================================================================
+di _n "================================================================="
+di "=== KOMBINIERTE VERGLEICHSTABELLE ==="
+di "=================================================================" _n
+
+foreach depvar of local dep_all {
+    di _n "--- Vergleich: `depvar' ---"
+
+    capture svy, subpop(sample): logistic `depvar' i.iwp_group ib2018.year
+    if _rc == 0 est store cmp1_`depvar'
+
+    capture svy, subpop(sample): logistic `depvar' i.iwp_group c.age c.age_sq i.sex ib2018.year
+    if _rc == 0 est store cmp2_`depvar'
+
+    capture svy, subpop(sample): logistic `depvar' i.iwp_group c.age c.age_sq i.sex ib4.hh_type ib2018.year
+    if _rc == 0 est store cmp3_`depvar'
+}
+
+* Console-Ausgabe M1
+di _n "=== VERGLEICH M1: Basis ==="
+esttab cmp1_dep_smd cmp1_dep_clothes cmp1_dep_shoes cmp1_dep_social cmp1_dep_leisure cmp1_dep_pocket cmp1_dep_internet cmp1_dep_holiday cmp1_dep_meat cmp1_dep_unexp cmp1_dep_rent cmp1_dep_util cmp1_dep_loan cmp1_dep_warm, eform ci nostar keep(1.iwp_group) coeflabels(1.iwp_group "OR: IWP Emp") title("Vergleich M1: Basis")
+
+* Console-Ausgabe M2
+di _n "=== VERGLEICH M2: + Alter + Geschlecht ==="
+esttab cmp2_dep_smd cmp2_dep_clothes cmp2_dep_shoes cmp2_dep_social cmp2_dep_leisure cmp2_dep_pocket cmp2_dep_internet cmp2_dep_holiday cmp2_dep_meat cmp2_dep_unexp cmp2_dep_rent cmp2_dep_util cmp2_dep_loan cmp2_dep_warm, eform ci nostar keep(1.iwp_group) coeflabels(1.iwp_group "OR: IWP Emp") title("Vergleich M2: + Alter + Geschlecht")
+
+* Console-Ausgabe M3
+di _n "=== VERGLEICH M3: + Alter + Geschlecht + HH-Typ ==="
+esttab cmp3_dep_smd cmp3_dep_clothes cmp3_dep_shoes cmp3_dep_social cmp3_dep_leisure cmp3_dep_pocket cmp3_dep_internet cmp3_dep_holiday cmp3_dep_meat cmp3_dep_unexp cmp3_dep_rent cmp3_dep_util cmp3_dep_loan cmp3_dep_warm, eform ci nostar keep(1.iwp_group) coeflabels(1.iwp_group "OR: IWP Emp") title("Vergleich M3: + Alter + Geschlecht + HH-Typ")
+
+* CSV-Output
+esttab cmp1_dep_smd cmp1_dep_clothes cmp1_dep_shoes cmp1_dep_social cmp1_dep_leisure cmp1_dep_pocket cmp1_dep_internet cmp1_dep_holiday cmp1_dep_meat cmp1_dep_unexp cmp1_dep_rent cmp1_dep_util cmp1_dep_loan cmp1_dep_warm using "$output/Regression_Vergleich_M1.csv", eform ci nostar replace keep(1.iwp_group) title("Modell 1: Basis")
+
+esttab cmp2_dep_smd cmp2_dep_clothes cmp2_dep_shoes cmp2_dep_social cmp2_dep_leisure cmp2_dep_pocket cmp2_dep_internet cmp2_dep_holiday cmp2_dep_meat cmp2_dep_unexp cmp2_dep_rent cmp2_dep_util cmp2_dep_loan cmp2_dep_warm using "$output/Regression_Vergleich_M2.csv", eform ci nostar replace keep(1.iwp_group) title("Modell 2: + Alter + Geschlecht")
+
+esttab cmp3_dep_smd cmp3_dep_clothes cmp3_dep_shoes cmp3_dep_social cmp3_dep_leisure cmp3_dep_pocket cmp3_dep_internet cmp3_dep_holiday cmp3_dep_meat cmp3_dep_unexp cmp3_dep_rent cmp3_dep_util cmp3_dep_loan cmp3_dep_warm using "$output/Regression_Vergleich_M3.csv", eform ci nostar replace keep(1.iwp_group) title("Modell 3: + Alter + Geschlecht + HH-Typ")
+
+estimates clear
+
+di as result _n "================================================================="
+di "=== ALLE REGRESSIONEN FERTIG ==="
+di "================================================================="
+di "Outputs:"
+di "  Regression_M1_Basis.csv       - nur iwp_group + Year-FE"
+di "  Regression_M2_AlterSex.csv    - + Alter + Alter2 + Geschlecht"
+di "  Regression_M3_Voll.csv        - + HH-Typ (Ref: 2E ohne Kinder)"
+di "  Regression_Vergleich_M1.csv   - M1 alle Deprivationen"
+di "  Regression_Vergleich_M2.csv   - M2 alle Deprivationen"
+di "  Regression_Vergleich_M3.csv   - M3 alle Deprivationen"
+di ""
+di "Interpretation:"
+di "  OR < 1: IWP Employees WENIGER depriviert als AROP w/o IWP"
+di "  OR > 1: IWP Employees MEHR depriviert als AROP w/o IWP"
+di "  OR = 1: Kein Unterschied"
+di ""
+di "  Wenn OR ueber M1->M2->M3 stabil bleibt: Effekt robust"
+di "  Wenn OR sich aendert: Kompositionseffekte (Alter/Sex/HH) spielen Rolle"
+di "================================================================="

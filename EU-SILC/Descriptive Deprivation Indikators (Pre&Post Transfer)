@@ -1,0 +1,2412 @@
+*******************************************************************************************************************************************************************************************
+*** Title: Poverty Analysis by EU-SILC Risk Indicators (RX040-RX070) - Pre/Post Transfer - Austria 2017-2024
+*** Indicators: RX040 Work Intensity, RX050 Low Work Intensity, RX060 Severe Material Deprivation, RX070 AROPE
+*** Date: 03.03.2026
+*** Order: 1. AROP | 2. AROP w/o IWP | 3. IWP | 4. IWP Employees (LES==3)
+*******************************************************************************************************************************************************************************************
+
+clear all
+set more off
+
+use "D:\Data\AT_CROSS\SILC_CrossSec_AllYears_2015_2024.dta"
+global output "D:\InWorkPoverty_SILC"
+
+local years "2017 2018 2019 2020 2021 2022 2023 2024"
+
+di _n "=== RX INDICATORS ANALYSIS START (PRE/POST TRANSFER) ===" _n
+
+*===============================================================================
+* DESTRING VARIABLES
+*===============================================================================
+local numeric_vars "HX090 HY023 HX050 RB050 PB040 RX010 PX010 PL073 PL074 PL075 PL076 year PB150 PL040 PL040A RX040 RX050 RX060 RX070"
+
+foreach var of local numeric_vars {
+    capture confirm variable `var'
+    if _rc == 0 {
+        capture confirm string variable `var'
+        if _rc == 0 {
+            replace `var' = subinstr(`var', ",", ".", .)
+            destring `var', replace force
+        }
+    }
+}
+
+*===============================================================================
+* BASIC VARIABLES
+*===============================================================================
+capture confirm variable RB050
+if _rc == 0 {
+    gen dwt = RB050
+}
+else {
+    gen dwt = PB040
+}
+
+capture confirm variable RX010
+if _rc == 0 {
+    gen age = RX010
+}
+else {
+    gen age = PX010
+}
+
+gen months_worked = 0
+foreach var in PL073 PL074 PL075 PL076 {
+    capture confirm variable `var'
+    if _rc == 0 {
+        replace months_worked = months_worked + `var' if !missing(`var')
+    }
+}
+replace months_worked = 12 if months_worked > 12 & !missing(months_worked)
+
+* POST-TRANSFER INCOME (already equivalised)
+gen eq_hh_ils_post = HX090
+
+* PRE-TRANSFER INCOME (HY023 / equivalence scale = HX050)
+gen eq_hh_ils_pre = HY023 / HX050 if !missing(HY023) & !missing(HX050) & HX050 > 0
+
+drop if missing(eq_hh_ils_post) | missing(dwt) | missing(age)
+
+*===============================================================================
+* EMPLOYMENT STATUS (PL040 / PL040A)
+*===============================================================================
+di _n "=== Creating employment status ===" _n
+
+gen emp_status = .
+label variable emp_status "Employment status (PL040/PL040A)"
+
+capture confirm variable PL040
+if _rc == 0 {
+    replace emp_status = PL040 if inrange(year, 2015, 2020)
+    di "Employment status from PL040 used for 2015-2020"
+}
+
+capture confirm variable PL040A
+if _rc == 0 {
+    replace emp_status = PL040A if inrange(year, 2021, 2024)
+    di "Employment status from PL040A used for 2021-2024"
+}
+
+gen byte employee = (emp_status == 3)
+label variable employee "Employee (emp_status == 3)"
+
+*===============================================================================
+* HOUSEHOLD COMPOSITION AND TYPE
+*===============================================================================
+di _n "=== Creating household composition variables ===" _n
+
+capture confirm variable id_hh
+if _rc == 0 {
+    gen hh_id = id_hh
+    di "Using id_hh as household identifier"
+}
+else {
+    capture confirm variable HB030
+    if _rc == 0 {
+        gen hh_id = HB030
+        di "Using HB030 as household identifier"
+    }
+    else {
+        capture confirm variable DB030
+        if _rc == 0 {
+            gen hh_id = DB030
+            di "Using DB030 as household identifier"
+        }
+        else {
+            di as error "No household ID found"
+            exit 1
+        }
+    }
+}
+
+bysort year hh_id: egen n_adults = total(age >= 14)
+bysort year hh_id: egen n_children = total(age < 14)
+bysort year hh_id: egen hh_size = count(hh_id)
+
+gen hh_type = .
+replace hh_type = 1 if n_adults == 1 & n_children == 0
+replace hh_type = 2 if n_adults == 1 & n_children == 1
+replace hh_type = 3 if n_adults == 1 & n_children >= 2
+replace hh_type = 4 if n_adults == 2 & n_children == 0
+replace hh_type = 5 if n_adults == 2 & n_children == 1
+replace hh_type = 6 if n_adults == 2 & n_children == 2
+replace hh_type = 7 if n_adults == 2 & n_children >= 3
+replace hh_type = 8 if n_adults >= 3 & n_children == 0
+replace hh_type = 9 if n_adults >= 3 & n_children >= 1
+replace hh_type = 10 if missing(hh_type)
+
+label define hh_type_lbl 1 "1 Erwachsener" 2 "1 Erwachsener + 1 Kind" 3 "1 Erwachsener + 2+ Kinder" 4 "2 Erwachsene" 5 "2 Erwachsene + 1 Kind" 6 "2 Erwachsene + 2 Kinder" 7 "2 Erwachsene + 3+ Kinder" 8 "3+ Erwachsene" 9 "3+ Erwachsene mit Kindern" 10 "Sonstige"
+label values hh_type hh_type_lbl
+label variable hh_type "Household type"
+
+tab hh_type, missing
+
+*===============================================================================
+* POVERTY THRESHOLD (based on POST-transfer income)
+*===============================================================================
+tempfile thresholds
+tempname h
+postfile `h' int year double median_eq_hh_ils pov_threshold_60 using `thresholds', replace
+
+foreach yr of local years {
+    quietly count if year==`yr'
+    if r(N)==0 continue
+    quietly _pctile eq_hh_ils_post [pw=dwt] if year==`yr', p(50)
+    local median_val = r(r1)
+    post `h' (`yr') (`median_val') (0.60*`median_val')
+}
+postclose `h'
+
+merge m:1 year using `thresholds', nogen
+replace pov_threshold_60 = round(pov_threshold_60, 1)
+
+*===============================================================================
+* POVERTY STATUS - PRE AND POST
+* Order: 1. AROP | 2. AROP w/o IWP | 3. IWP | 4. IWP Employees
+*===============================================================================
+
+* 1. AROP
+gen byte arop_post = (eq_hh_ils_post < pov_threshold_60) if !missing(pov_threshold_60)
+gen byte arop_pre = (eq_hh_ils_pre < pov_threshold_60) if !missing(pov_threshold_60) & !missing(eq_hh_ils_pre)
+
+* Worker definition
+gen worker = (months_worked > 6 & age >= 18 & age <= 64)
+
+* 3. IWP (all workers: employees + self-employed)
+gen inwork_poor_post = (worker == 1 & arop_post == 1)
+gen inwork_poor_pre = (worker == 1 & arop_pre == 1)
+
+* 2. AROP without IWP
+gen axi_post = (arop_post == 1 & inwork_poor_post == 0 & age >= 18 & age <= 64) if !missing(arop_post)
+gen axi_pre  = (arop_pre  == 1 & inwork_poor_pre  == 0 & age >= 18 & age <= 64) if !missing(arop_pre)
+label variable axi_post "AROP without IWP (post-transfer)"
+label variable axi_pre "AROP without IWP (pre-transfer)"
+
+* 4. IWP Employees (LES==3 only)
+gen byte iwp_emp_post = (inwork_poor_post == 1 & emp_status == 3)
+gen byte iwp_emp_pre = (inwork_poor_pre == 1 & emp_status == 3)
+label variable iwp_emp_post "IWP Employees post transfer (LES==3)"
+label variable iwp_emp_pre "IWP Employees pre transfer (LES==3)"
+
+*===============================================================================
+* CREATE RX INDICATOR VARIABLES
+*===============================================================================
+di _n "=== Creating RX indicator variables ===" _n
+
+* -------------------------------------------------------------------
+* RX040 - Work Intensity (continuous, household level)
+* Categorized into Eurostat-style groups
+* Scale: 0-1 or 0-100 depending on dataset
+* -------------------------------------------------------------------
+capture confirm variable RX040
+if _rc == 0 {
+    * Check scale: if max > 1, assume 0-100 scale
+    quietly sum RX040
+    local rx040_max = r(max)
+    
+    gen rx040_wi = .
+    
+    if `rx040_max' > 1 {
+        di "RX040 is on 0-100 scale (max = `rx040_max')"
+        * 0-100 scale thresholds
+        replace rx040_wi = 0 if RX040 == 0 & !missing(RX040)
+        replace rx040_wi = 1 if RX040 > 0 & RX040 < 20 & !missing(RX040)
+        replace rx040_wi = 2 if RX040 >= 20 & RX040 < 45 & !missing(RX040)
+        replace rx040_wi = 3 if RX040 >= 45 & RX040 < 55 & !missing(RX040)
+        replace rx040_wi = 4 if RX040 >= 55 & RX040 < 85 & !missing(RX040)
+        replace rx040_wi = 5 if RX040 >= 85 & !missing(RX040)
+    }
+    else {
+        di "RX040 is on 0-1 scale (max = `rx040_max')"
+        * 0-1 scale thresholds
+        replace rx040_wi = 0 if RX040 == 0 & !missing(RX040)
+        replace rx040_wi = 1 if RX040 > 0 & RX040 < 0.20 & !missing(RX040)
+        replace rx040_wi = 2 if RX040 >= 0.20 & RX040 < 0.45 & !missing(RX040)
+        replace rx040_wi = 3 if RX040 >= 0.45 & RX040 < 0.55 & !missing(RX040)
+        replace rx040_wi = 4 if RX040 >= 0.55 & RX040 < 0.85 & !missing(RX040)
+        replace rx040_wi = 5 if RX040 >= 0.85 & !missing(RX040)
+    }
+    
+    label define rx040_lbl 0 "Jobless (WI=0)" 1 "Very Low (0<WI<20)" 2 "Low (20<=WI<45)" 3 "Medium (45<=WI<55)" 4 "High (55<=WI<85)" 5 "Full (WI>=85)"
+    label values rx040_wi rx040_lbl
+    label variable rx040_wi "Work intensity category (RX040)"
+    
+    di "RX040 Work Intensity categories created"
+    tab rx040_wi, missing
+}
+else {
+    gen rx040_wi = .
+    di as error "WARNING: RX040 not found"
+}
+
+* -------------------------------------------------------------------
+* RX050 - Low Work Intensity Status (0=No, 1=Yes, 2=N/A)
+* Set 2 (not applicable) to missing for binary analysis
+* -------------------------------------------------------------------
+capture confirm variable RX050
+if _rc == 0 {
+    gen rx050_lwi = .
+    replace rx050_lwi = 0 if RX050 == 0
+    replace rx050_lwi = 1 if RX050 == 1
+    * RX050 == 2 (not applicable) stays missing
+    label variable rx050_lwi "Low work intensity (0=No, 1=Yes)"
+    
+    di "RX050 Low Work Intensity created (value 2 = N/A set to missing)"
+    tab rx050_lwi, missing
+}
+else {
+    gen rx050_lwi = .
+    di as error "WARNING: RX050 not found"
+}
+
+* -------------------------------------------------------------------
+* RX060 - Severely Materially and Socially Deprived Household (0/1)
+* -------------------------------------------------------------------
+capture confirm variable RX060
+if _rc == 0 {
+    gen rx060_smd = .
+    replace rx060_smd = 0 if RX060 == 0
+    replace rx060_smd = 1 if RX060 == 1
+    label variable rx060_smd "Severe material & social deprivation (0=No, 1=Yes)"
+    
+    di "RX060 Severe Material Deprivation created"
+    tab rx060_smd, missing
+}
+else {
+    gen rx060_smd = .
+    di as error "WARNING: RX060 not found"
+}
+
+* -------------------------------------------------------------------
+* RX070 - At Risk of Poverty or Social Exclusion (AROPE)
+* Values: 0, 1, 10, 11, 100, 101, 110, 111
+* Recode to binary: 0 = not at risk, 1 = at risk (any positive value)
+* -------------------------------------------------------------------
+capture confirm variable RX070
+if _rc == 0 {
+    gen rx070_arope = .
+    replace rx070_arope = 0 if RX070 == 0
+    replace rx070_arope = 1 if RX070 > 0 & !missing(RX070)
+    label variable rx070_arope "AROPE binary (0=Not at risk, 1=At risk)"
+    
+    * Also create detailed AROPE for separate analysis
+    gen rx070_detail = RX070 if !missing(RX070)
+    label variable rx070_detail "AROPE detailed (3-digit composite)"
+    
+    di "RX070 AROPE created (binary + detailed)"
+    tab rx070_arope, missing
+    di _n "RX070 detailed distribution:"
+    tab rx070_detail, missing
+}
+else {
+    gen rx070_arope = .
+    gen rx070_detail = .
+    di as error "WARNING: RX070 not found"
+}
+
+* Sex
+capture confirm variable PB150
+if _rc == 0 {
+    gen sex = PB150
+    label define sex_lbl 1 "Male" 2 "Female"
+    label values sex sex_lbl
+    di "Sex variable created"
+}
+else {
+    gen sex = .
+    di as error "WARNING: PB150 not found"
+}
+
+* SAVE ORIGINAL DATA
+tempfile original_data
+save `original_data', replace
+
+*===============================================================================
+* CALCULATE REFERENCE TOTALS
+*===============================================================================
+di _n "=== Calculating reference totals ===" _n
+
+foreach yr of local years {
+    quietly count if year == `yr'
+    if r(N) == 0 continue
+    
+    sum dwt if year == `yr'
+    local ref_pop_`yr' = r(sum)
+    
+    * 1. AROP
+    sum dwt if year == `yr' & arop_post == 1
+    local ref_arop_po_`yr' = r(sum)
+    sum dwt if year == `yr' & arop_pre == 1
+    local ref_arop_pr_`yr' = r(sum)
+    
+    * 2. AROP without IWP
+    sum dwt if year == `yr' & axi_post == 1
+    local ref_axi_po_`yr' = r(sum)
+    sum dwt if year == `yr' & axi_pre == 1
+    local ref_axi_pr_`yr' = r(sum)
+    
+    * 3. IWP
+    sum dwt if year == `yr' & worker == 1
+    local ref_wrk_`yr' = r(sum)
+    sum dwt if year == `yr' & worker == 1 & inwork_poor_post == 1
+    local ref_iwp_po_`yr' = r(sum)
+    sum dwt if year == `yr' & worker == 1 & inwork_poor_pre == 1
+    local ref_iwp_pr_`yr' = r(sum)
+    
+    * 4. IWP Employees
+    sum dwt if year == `yr' & worker == 1 & emp_status == 3
+    local ref_emp_`yr' = r(sum)
+    sum dwt if year == `yr' & worker == 1 & emp_status == 3 & iwp_emp_post == 1
+    local ref_iwpe_po_`yr' = r(sum)
+    sum dwt if year == `yr' & worker == 1 & emp_status == 3 & iwp_emp_pre == 1
+    local ref_iwpe_pr_`yr' = r(sum)
+}
+
+*===============================================================================
+* DEFINE INDICATOR PROPERTIES
+*===============================================================================
+
+* Binary indicators (cat 0/1) - same structure as deprivation code
+local bin_vars "rx050_lwi rx060_smd rx070_arope"
+
+local label_rx050_lwi "Low_Work_Int"
+local label_rx060_smd "Sev_Mat_Dep"
+local label_rx070_arope "AROPE"
+
+local desc_rx050_lwi "Low Work Intensity (RX050)"
+local desc_rx060_smd "Severely Materially & Socially Deprived (RX060)"
+local desc_rx070_arope "At Risk of Poverty or Social Exclusion (RX070)"
+
+local cat0_rx050_lwi "NO LOW WORK INTENSITY"
+local cat1_rx050_lwi "LOW WORK INTENSITY"
+local cat0_rx060_smd "NOT SEVERELY DEPRIVED"
+local cat1_rx060_smd "SEVERELY DEPRIVED"
+local cat0_rx070_arope "NOT AT RISK (AROPE)"
+local cat1_rx070_arope "AT RISK (AROPE)"
+
+* HH type labels
+local hh_label_1 "1 Erwachsener"
+local hh_label_2 "1 Erwachsener + 1 Kind"
+local hh_label_3 "1 Erwachsener + 2+ Kinder"
+local hh_label_4 "2 Erwachsene"
+local hh_label_5 "2 Erwachsene + 1 Kind"
+local hh_label_6 "2 Erwachsene + 2 Kinder"
+local hh_label_7 "2 Erwachsene + 3+ Kinder"
+local hh_label_8 "3+ Erwachsene"
+local hh_label_9 "3+ Erwachsene mit Kindern"
+local hh_label_10 "Sonstige"
+
+*===============================================================================
+*===============================================================================
+* PART A: BINARY INDICATORS (RX050, RX060, RX070)
+* Identical structure to personal/household deprivation code
+*===============================================================================
+*===============================================================================
+
+local sheet_num = 0
+
+foreach depvar of local bin_vars {
+    
+    use `original_data', clear
+    
+    capture confirm variable `depvar'
+    if _rc != 0 {
+        di as error "Variable `depvar' not found, skipping..."
+        continue
+    }
+    
+    quietly count if !missing(`depvar')
+    if r(N) == 0 {
+        di as error "Variable `depvar' has no data, skipping..."
+        continue
+    }
+    
+    local sheet_num = `sheet_num' + 1
+    
+    di _n "=== Analyzing: `depvar' (`desc_`depvar'') ===" _n
+    
+    *===========================================================================
+    * OVERALL - PRE AND POST
+    *===========================================================================
+    
+    foreach yr of local years {
+        quietly count if year == `yr' & !missing(`depvar')
+        if r(N) == 0 continue
+        
+        sum dwt if year == `yr' & !missing(`depvar')
+        local tot_pop_`yr' = r(sum)
+        local pct_pop_`yr' = (`tot_pop_`yr'' / `ref_pop_`yr'') * 100
+        
+        * 1. AROP
+        sum dwt if year == `yr' & !missing(`depvar') & arop_post == 1
+        local tot_arop_po_`yr' = r(sum)
+        local pct_arop_po_`yr' = (`tot_arop_po_`yr'' / `ref_arop_po_`yr'') * 100
+        sum dwt if year == `yr' & !missing(`depvar') & arop_pre == 1
+        local tot_arop_pr_`yr' = r(sum)
+        local pct_arop_pr_`yr' = (`tot_arop_pr_`yr'' / `ref_arop_pr_`yr'') * 100
+        
+        * 2. AROP without IWP
+        sum dwt if year == `yr' & !missing(`depvar') & axi_post == 1
+        local tot_axi_po_`yr' = r(sum)
+        if `ref_axi_po_`yr'' > 0 {
+            local pct_axi_po_`yr' = (`tot_axi_po_`yr'' / `ref_axi_po_`yr'') * 100
+        }
+        else {
+            local pct_axi_po_`yr' = .
+        }
+        sum dwt if year == `yr' & !missing(`depvar') & axi_pre == 1
+        local tot_axi_pr_`yr' = r(sum)
+        if `ref_axi_pr_`yr'' > 0 {
+            local pct_axi_pr_`yr' = (`tot_axi_pr_`yr'' / `ref_axi_pr_`yr'') * 100
+        }
+        else {
+            local pct_axi_pr_`yr' = .
+        }
+        
+        * 3. IWP
+        sum dwt if year == `yr' & worker == 1 & !missing(`depvar')
+        local tot_wrk_`yr' = r(sum)
+        local pct_wrk_`yr' = (`tot_wrk_`yr'' / `ref_wrk_`yr'') * 100
+        sum dwt if year == `yr' & worker == 1 & !missing(`depvar') & inwork_poor_post == 1
+        local tot_iwp_po_`yr' = r(sum)
+        if `ref_iwp_po_`yr'' > 0 {
+            local pct_iwp_po_`yr' = (`tot_iwp_po_`yr'' / `ref_iwp_po_`yr'') * 100
+        }
+        else {
+            local pct_iwp_po_`yr' = .
+        }
+        sum dwt if year == `yr' & worker == 1 & !missing(`depvar') & inwork_poor_pre == 1
+        local tot_iwp_pr_`yr' = r(sum)
+        if `ref_iwp_pr_`yr'' > 0 {
+            local pct_iwp_pr_`yr' = (`tot_iwp_pr_`yr'' / `ref_iwp_pr_`yr'') * 100
+        }
+        else {
+            local pct_iwp_pr_`yr' = .
+        }
+        
+        * 4. IWP Employees
+        sum dwt if year == `yr' & worker == 1 & emp_status == 3 & !missing(`depvar')
+        local tot_emp_`yr' = r(sum)
+        if `ref_emp_`yr'' > 0 {
+            local pct_emp_`yr' = (`tot_emp_`yr'' / `ref_emp_`yr'') * 100
+        }
+        else {
+            local pct_emp_`yr' = .
+        }
+        sum dwt if year == `yr' & worker == 1 & emp_status == 3 & !missing(`depvar') & iwp_emp_post == 1
+        local tot_iwpe_po_`yr' = r(sum)
+        if `ref_iwpe_po_`yr'' > 0 {
+            local pct_iwpe_po_`yr' = (`tot_iwpe_po_`yr'' / `ref_iwpe_po_`yr'') * 100
+        }
+        else {
+            local pct_iwpe_po_`yr' = .
+        }
+        sum dwt if year == `yr' & worker == 1 & emp_status == 3 & !missing(`depvar') & iwp_emp_pre == 1
+        local tot_iwpe_pr_`yr' = r(sum)
+        if `ref_iwpe_pr_`yr'' > 0 {
+            local pct_iwpe_pr_`yr' = (`tot_iwpe_pr_`yr'' / `ref_iwpe_pr_`yr'') * 100
+        }
+        else {
+            local pct_iwpe_pr_`yr' = .
+        }
+        
+        * By category (0/1)
+        forvalues cat = 0/1 {
+            
+            quietly count if year == `yr' & `depvar' == `cat'
+            if r(N) == 0 {
+                local arop_rt_po_`cat'_`yr' = .
+                local arop_rt_pr_`cat'_`yr' = .
+                local shr_tot_`cat'_`yr' = .
+                local shr_arop_po_`cat'_`yr' = .
+                local shr_arop_pr_`cat'_`yr' = .
+                local axi_rt_po_`cat'_`yr' = .
+                local axi_rt_pr_`cat'_`yr' = .
+                local shr_axi_po_`cat'_`yr' = .
+                local shr_axi_pr_`cat'_`yr' = .
+                local iwp_rt_po_`cat'_`yr' = .
+                local iwp_rt_pr_`cat'_`yr' = .
+                local shr_iwp_po_`cat'_`yr' = .
+                local shr_iwp_pr_`cat'_`yr' = .
+                local iwpe_rt_po_`cat'_`yr' = .
+                local iwpe_rt_pr_`cat'_`yr' = .
+                local shr_iwpe_po_`cat'_`yr' = .
+                local shr_iwpe_pr_`cat'_`yr' = .
+                continue
+            }
+            
+            sum dwt if year == `yr' & `depvar' == `cat'
+            local n_total_cat = r(sum)
+            local shr_tot_`cat'_`yr' = (`n_total_cat' / `tot_pop_`yr'') * 100
+            
+            * 1. AROP
+            sum arop_post [aw=dwt] if year == `yr' & `depvar' == `cat'
+            local arop_rt_po_`cat'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & `depvar' == `cat' & arop_post == 1
+            local n_arop_post_cat = r(sum)
+            if `tot_arop_po_`yr'' > 0 {
+                local shr_arop_po_`cat'_`yr' = (`n_arop_post_cat' / `tot_arop_po_`yr'') * 100
+            }
+            else {
+                local shr_arop_po_`cat'_`yr' = .
+            }
+            sum arop_pre [aw=dwt] if year == `yr' & `depvar' == `cat'
+            local arop_rt_pr_`cat'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & `depvar' == `cat' & arop_pre == 1
+            local n_arop_pre_cat = r(sum)
+            if `tot_arop_pr_`yr'' > 0 {
+                local shr_arop_pr_`cat'_`yr' = (`n_arop_pre_cat' / `tot_arop_pr_`yr'') * 100
+            }
+            else {
+                local shr_arop_pr_`cat'_`yr' = .
+            }
+            
+            * 2. AROP without IWP
+            sum axi_post [aw=dwt] if year == `yr' & `depvar' == `cat'
+            local axi_rt_po_`cat'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & `depvar' == `cat' & axi_post == 1
+            local n_axi_post_cat = r(sum)
+            if `tot_axi_po_`yr'' > 0 {
+                local shr_axi_po_`cat'_`yr' = (`n_axi_post_cat' / `tot_axi_po_`yr'') * 100
+            }
+            else {
+                local shr_axi_po_`cat'_`yr' = .
+            }
+            sum axi_pre [aw=dwt] if year == `yr' & `depvar' == `cat'
+            local axi_rt_pr_`cat'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & `depvar' == `cat' & axi_pre == 1
+            local n_axi_pre_cat = r(sum)
+            if `tot_axi_pr_`yr'' > 0 {
+                local shr_axi_pr_`cat'_`yr' = (`n_axi_pre_cat' / `tot_axi_pr_`yr'') * 100
+            }
+            else {
+                local shr_axi_pr_`cat'_`yr' = .
+            }
+            
+            * 3. IWP
+            quietly count if year == `yr' & `depvar' == `cat' & worker == 1
+            if r(N) > 0 {
+                sum inwork_poor_post [aw=dwt] if year == `yr' & `depvar' == `cat' & worker == 1
+                local iwp_rt_po_`cat'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & `depvar' == `cat' & worker == 1 & inwork_poor_post == 1
+                local n_iwp_post_cat = r(sum)
+                if `tot_iwp_po_`yr'' > 0 {
+                    local shr_iwp_po_`cat'_`yr' = (`n_iwp_post_cat' / `tot_iwp_po_`yr'') * 100
+                }
+                else {
+                    local shr_iwp_po_`cat'_`yr' = .
+                }
+                sum inwork_poor_pre [aw=dwt] if year == `yr' & `depvar' == `cat' & worker == 1
+                local iwp_rt_pr_`cat'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & `depvar' == `cat' & worker == 1 & inwork_poor_pre == 1
+                local n_iwp_pre_cat = r(sum)
+                if `tot_iwp_pr_`yr'' > 0 {
+                    local shr_iwp_pr_`cat'_`yr' = (`n_iwp_pre_cat' / `tot_iwp_pr_`yr'') * 100
+                }
+                else {
+                    local shr_iwp_pr_`cat'_`yr' = .
+                }
+            }
+            else {
+                local iwp_rt_po_`cat'_`yr' = .
+                local iwp_rt_pr_`cat'_`yr' = .
+                local shr_iwp_po_`cat'_`yr' = .
+                local shr_iwp_pr_`cat'_`yr' = .
+            }
+            
+            * 4. IWP Employees
+            quietly count if year == `yr' & `depvar' == `cat' & worker == 1 & emp_status == 3
+            if r(N) > 0 {
+                sum iwp_emp_post [aw=dwt] if year == `yr' & `depvar' == `cat' & worker == 1 & emp_status == 3
+                local iwpe_rt_po_`cat'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & `depvar' == `cat' & worker == 1 & emp_status == 3 & iwp_emp_post == 1
+                local n_iwpe_post_cat = r(sum)
+                if `tot_iwpe_po_`yr'' > 0 {
+                    local shr_iwpe_po_`cat'_`yr' = (`n_iwpe_post_cat' / `tot_iwpe_po_`yr'') * 100
+                }
+                else {
+                    local shr_iwpe_po_`cat'_`yr' = .
+                }
+                sum iwp_emp_pre [aw=dwt] if year == `yr' & `depvar' == `cat' & worker == 1 & emp_status == 3
+                local iwpe_rt_pr_`cat'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & `depvar' == `cat' & worker == 1 & emp_status == 3 & iwp_emp_pre == 1
+                local n_iwpe_pre_cat = r(sum)
+                if `tot_iwpe_pr_`yr'' > 0 {
+                    local shr_iwpe_pr_`cat'_`yr' = (`n_iwpe_pre_cat' / `tot_iwpe_pr_`yr'') * 100
+                }
+                else {
+                    local shr_iwpe_pr_`cat'_`yr' = .
+                }
+            }
+            else {
+                local iwpe_rt_po_`cat'_`yr' = .
+                local iwpe_rt_pr_`cat'_`yr' = .
+                local shr_iwpe_po_`cat'_`yr' = .
+                local shr_iwpe_pr_`cat'_`yr' = .
+            }
+        }
+    }
+    
+    *===========================================================================
+    * BY SEX
+    *===========================================================================
+    
+    quietly count if !missing(sex)
+    local has_sex = (r(N) > 0)
+    
+    if `has_sex' {
+        
+        forvalues sx = 1/2 {
+            foreach yr of local years {
+                
+                local tot_pop_s`sx'_`yr' = .
+                local pct_pop_s`sx'_`yr' = .
+                local tot_arop_po_s`sx'_`yr' = .
+                local pct_arop_po_s`sx'_`yr' = .
+                local tot_arop_pr_s`sx'_`yr' = .
+                local pct_arop_pr_s`sx'_`yr' = .
+                local tot_axi_po_s`sx'_`yr' = .
+                local pct_axi_po_s`sx'_`yr' = .
+                local tot_axi_pr_s`sx'_`yr' = .
+                local pct_axi_pr_s`sx'_`yr' = .
+                local tot_wrk_s`sx'_`yr' = .
+                local pct_wrk_s`sx'_`yr' = .
+                local tot_iwp_po_s`sx'_`yr' = .
+                local pct_iwp_po_s`sx'_`yr' = .
+                local tot_iwp_pr_s`sx'_`yr' = .
+                local pct_iwp_pr_s`sx'_`yr' = .
+                local tot_emp_s`sx'_`yr' = .
+                local pct_emp_s`sx'_`yr' = .
+                local tot_iwpe_po_s`sx'_`yr' = .
+                local pct_iwpe_po_s`sx'_`yr' = .
+                local tot_iwpe_pr_s`sx'_`yr' = .
+                local pct_iwpe_pr_s`sx'_`yr' = .
+                
+                forvalues cat = 0/1 {
+                    local arop_rt_po_s`sx'_`cat'_`yr' = .
+                    local arop_rt_pr_s`sx'_`cat'_`yr' = .
+                    local shr_tot_s`sx'_`cat'_`yr' = .
+                    local shr_arop_po_s`sx'_`cat'_`yr' = .
+                    local shr_arop_pr_s`sx'_`cat'_`yr' = .
+                    local axi_rt_po_s`sx'_`cat'_`yr' = .
+                    local axi_rt_pr_s`sx'_`cat'_`yr' = .
+                    local shr_axi_po_s`sx'_`cat'_`yr' = .
+                    local shr_axi_pr_s`sx'_`cat'_`yr' = .
+                    local iwp_rt_po_s`sx'_`cat'_`yr' = .
+                    local iwp_rt_pr_s`sx'_`cat'_`yr' = .
+                    local shr_iwp_po_s`sx'_`cat'_`yr' = .
+                    local shr_iwp_pr_s`sx'_`cat'_`yr' = .
+                    local iwpe_rt_po_s`sx'_`cat'_`yr' = .
+                    local iwpe_rt_pr_s`sx'_`cat'_`yr' = .
+                    local shr_iwpe_po_s`sx'_`cat'_`yr' = .
+                    local shr_iwpe_pr_s`sx'_`cat'_`yr' = .
+                }
+                
+                quietly count if year == `yr' & !missing(`depvar') & sex == `sx'
+                if r(N) == 0 continue
+                
+                sum dwt if year == `yr' & !missing(`depvar') & sex == `sx'
+                local tot_pop_s`sx'_`yr' = r(sum)
+                local pct_pop_s`sx'_`yr' = (`tot_pop_s`sx'_`yr'' / `ref_pop_`yr'') * 100
+                
+                * 1. AROP
+                sum dwt if year == `yr' & !missing(`depvar') & sex == `sx' & arop_post == 1
+                local tot_arop_po_s`sx'_`yr' = r(sum)
+                local pct_arop_po_s`sx'_`yr' = (`tot_arop_po_s`sx'_`yr'' / `ref_arop_po_`yr'') * 100
+                sum dwt if year == `yr' & !missing(`depvar') & sex == `sx' & arop_pre == 1
+                local tot_arop_pr_s`sx'_`yr' = r(sum)
+                local pct_arop_pr_s`sx'_`yr' = (`tot_arop_pr_s`sx'_`yr'' / `ref_arop_pr_`yr'') * 100
+                
+                * 2. AROP without IWP
+                sum dwt if year == `yr' & !missing(`depvar') & sex == `sx' & axi_post == 1
+                local tot_axi_po_s`sx'_`yr' = r(sum)
+                if `ref_axi_po_`yr'' > 0 {
+                    local pct_axi_po_s`sx'_`yr' = (`tot_axi_po_s`sx'_`yr'' / `ref_axi_po_`yr'') * 100
+                }
+                sum dwt if year == `yr' & !missing(`depvar') & sex == `sx' & axi_pre == 1
+                local tot_axi_pr_s`sx'_`yr' = r(sum)
+                if `ref_axi_pr_`yr'' > 0 {
+                    local pct_axi_pr_s`sx'_`yr' = (`tot_axi_pr_s`sx'_`yr'' / `ref_axi_pr_`yr'') * 100
+                }
+                
+                * 3. IWP
+                sum dwt if year == `yr' & worker == 1 & !missing(`depvar') & sex == `sx'
+                local tot_wrk_s`sx'_`yr' = r(sum)
+                local pct_wrk_s`sx'_`yr' = (`tot_wrk_s`sx'_`yr'' / `ref_wrk_`yr'') * 100
+                sum dwt if year == `yr' & worker == 1 & !missing(`depvar') & sex == `sx' & inwork_poor_post == 1
+                local tot_iwp_po_s`sx'_`yr' = r(sum)
+                if `ref_iwp_po_`yr'' > 0 {
+                    local pct_iwp_po_s`sx'_`yr' = (`tot_iwp_po_s`sx'_`yr'' / `ref_iwp_po_`yr'') * 100
+                }
+                sum dwt if year == `yr' & worker == 1 & !missing(`depvar') & sex == `sx' & inwork_poor_pre == 1
+                local tot_iwp_pr_s`sx'_`yr' = r(sum)
+                if `ref_iwp_pr_`yr'' > 0 {
+                    local pct_iwp_pr_s`sx'_`yr' = (`tot_iwp_pr_s`sx'_`yr'' / `ref_iwp_pr_`yr'') * 100
+                }
+                
+                * 4. IWP Employees
+                sum dwt if year == `yr' & worker == 1 & emp_status == 3 & !missing(`depvar') & sex == `sx'
+                local tot_emp_s`sx'_`yr' = r(sum)
+                if `ref_emp_`yr'' > 0 {
+                    local pct_emp_s`sx'_`yr' = (`tot_emp_s`sx'_`yr'' / `ref_emp_`yr'') * 100
+                }
+                sum dwt if year == `yr' & worker == 1 & emp_status == 3 & !missing(`depvar') & sex == `sx' & iwp_emp_post == 1
+                local tot_iwpe_po_s`sx'_`yr' = r(sum)
+                if `ref_iwpe_po_`yr'' > 0 {
+                    local pct_iwpe_po_s`sx'_`yr' = (`tot_iwpe_po_s`sx'_`yr'' / `ref_iwpe_po_`yr'') * 100
+                }
+                sum dwt if year == `yr' & worker == 1 & emp_status == 3 & !missing(`depvar') & sex == `sx' & iwp_emp_pre == 1
+                local tot_iwpe_pr_s`sx'_`yr' = r(sum)
+                if `ref_iwpe_pr_`yr'' > 0 {
+                    local pct_iwpe_pr_s`sx'_`yr' = (`tot_iwpe_pr_s`sx'_`yr'' / `ref_iwpe_pr_`yr'') * 100
+                }
+                
+                * By category within sex
+                forvalues cat = 0/1 {
+                    quietly count if year == `yr' & `depvar' == `cat' & sex == `sx'
+                    if r(N) == 0 continue
+                    
+                    sum dwt if year == `yr' & `depvar' == `cat' & sex == `sx'
+                    local n_total_cat = r(sum)
+                    local shr_tot_s`sx'_`cat'_`yr' = (`n_total_cat' / `tot_pop_s`sx'_`yr'') * 100
+                    
+                    * 1. AROP
+                    sum arop_post [aw=dwt] if year == `yr' & `depvar' == `cat' & sex == `sx'
+                    local arop_rt_po_s`sx'_`cat'_`yr' = r(mean) * 100
+                    sum dwt if year == `yr' & `depvar' == `cat' & sex == `sx' & arop_post == 1
+                    local n_arop_post_cat = r(sum)
+                    if `tot_arop_po_s`sx'_`yr'' > 0 {
+                        local shr_arop_po_s`sx'_`cat'_`yr' = (`n_arop_post_cat' / `tot_arop_po_s`sx'_`yr'') * 100
+                    }
+                    sum arop_pre [aw=dwt] if year == `yr' & `depvar' == `cat' & sex == `sx'
+                    local arop_rt_pr_s`sx'_`cat'_`yr' = r(mean) * 100
+                    sum dwt if year == `yr' & `depvar' == `cat' & sex == `sx' & arop_pre == 1
+                    local n_arop_pre_cat = r(sum)
+                    if `tot_arop_pr_s`sx'_`yr'' > 0 {
+                        local shr_arop_pr_s`sx'_`cat'_`yr' = (`n_arop_pre_cat' / `tot_arop_pr_s`sx'_`yr'') * 100
+                    }
+                    
+                    * 2. AROP without IWP
+                    sum axi_post [aw=dwt] if year == `yr' & `depvar' == `cat' & sex == `sx'
+                    local axi_rt_po_s`sx'_`cat'_`yr' = r(mean) * 100
+                    sum dwt if year == `yr' & `depvar' == `cat' & sex == `sx' & axi_post == 1
+                    local n_axi_post_cat = r(sum)
+                    if `tot_axi_po_s`sx'_`yr'' > 0 {
+                        local shr_axi_po_s`sx'_`cat'_`yr' = (`n_axi_post_cat' / `tot_axi_po_s`sx'_`yr'') * 100
+                    }
+                    sum axi_pre [aw=dwt] if year == `yr' & `depvar' == `cat' & sex == `sx'
+                    local axi_rt_pr_s`sx'_`cat'_`yr' = r(mean) * 100
+                    sum dwt if year == `yr' & `depvar' == `cat' & sex == `sx' & axi_pre == 1
+                    local n_axi_pre_cat = r(sum)
+                    if `tot_axi_pr_s`sx'_`yr'' > 0 {
+                        local shr_axi_pr_s`sx'_`cat'_`yr' = (`n_axi_pre_cat' / `tot_axi_pr_s`sx'_`yr'') * 100
+                    }
+                    
+                    * 3. IWP
+                    quietly count if year == `yr' & `depvar' == `cat' & sex == `sx' & worker == 1
+                    if r(N) > 0 {
+                        sum inwork_poor_post [aw=dwt] if year == `yr' & `depvar' == `cat' & sex == `sx' & worker == 1
+                        local iwp_rt_po_s`sx'_`cat'_`yr' = r(mean) * 100
+                        sum dwt if year == `yr' & `depvar' == `cat' & sex == `sx' & worker == 1 & inwork_poor_post == 1
+                        local n_iwp_post_cat = r(sum)
+                        if `tot_iwp_po_s`sx'_`yr'' > 0 {
+                            local shr_iwp_po_s`sx'_`cat'_`yr' = (`n_iwp_post_cat' / `tot_iwp_po_s`sx'_`yr'') * 100
+                        }
+                        sum inwork_poor_pre [aw=dwt] if year == `yr' & `depvar' == `cat' & sex == `sx' & worker == 1
+                        local iwp_rt_pr_s`sx'_`cat'_`yr' = r(mean) * 100
+                        sum dwt if year == `yr' & `depvar' == `cat' & sex == `sx' & worker == 1 & inwork_poor_pre == 1
+                        local n_iwp_pre_cat = r(sum)
+                        if `tot_iwp_pr_s`sx'_`yr'' > 0 {
+                            local shr_iwp_pr_s`sx'_`cat'_`yr' = (`n_iwp_pre_cat' / `tot_iwp_pr_s`sx'_`yr'') * 100
+                        }
+                    }
+                    
+                    * 4. IWP Employees
+                    quietly count if year == `yr' & `depvar' == `cat' & sex == `sx' & worker == 1 & emp_status == 3
+                    if r(N) > 0 {
+                        sum iwp_emp_post [aw=dwt] if year == `yr' & `depvar' == `cat' & sex == `sx' & worker == 1 & emp_status == 3
+                        local iwpe_rt_po_s`sx'_`cat'_`yr' = r(mean) * 100
+                        sum dwt if year == `yr' & `depvar' == `cat' & sex == `sx' & worker == 1 & emp_status == 3 & iwp_emp_post == 1
+                        local n_iwpe_post_cat = r(sum)
+                        if `tot_iwpe_po_s`sx'_`yr'' > 0 {
+                            local shr_iwpe_po_s`sx'_`cat'_`yr' = (`n_iwpe_post_cat' / `tot_iwpe_po_s`sx'_`yr'') * 100
+                        }
+                        sum iwp_emp_pre [aw=dwt] if year == `yr' & `depvar' == `cat' & sex == `sx' & worker == 1 & emp_status == 3
+                        local iwpe_rt_pr_s`sx'_`cat'_`yr' = r(mean) * 100
+                        sum dwt if year == `yr' & `depvar' == `cat' & sex == `sx' & worker == 1 & emp_status == 3 & iwp_emp_pre == 1
+                        local n_iwpe_pre_cat = r(sum)
+                        if `tot_iwpe_pr_s`sx'_`yr'' > 0 {
+                            local shr_iwpe_pr_s`sx'_`cat'_`yr' = (`n_iwpe_pre_cat' / `tot_iwpe_pr_s`sx'_`yr'') * 100
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    *===========================================================================
+    * BY HOUSEHOLD TYPE - ONLY FOR "AT RISK" CATEGORY (cat=1)
+    *===========================================================================
+    
+    di "Calculating statistics by household type for AT RISK category..."
+    
+    foreach yr of local years {
+        
+        quietly count if year == `yr' & `depvar' == 1
+        if r(N) == 0 continue
+        
+        sum dwt if year == `yr' & `depvar' == 1
+        local tot_ca_`yr' = r(sum)
+        
+        sum dwt if year == `yr' & `depvar' == 1 & arop_post == 1
+        local tot_ca_arop_po_`yr' = r(sum)
+        sum dwt if year == `yr' & `depvar' == 1 & arop_pre == 1
+        local tot_ca_arop_pr_`yr' = r(sum)
+        sum dwt if year == `yr' & `depvar' == 1 & axi_post == 1
+        local tot_ca_axi_po_`yr' = r(sum)
+        sum dwt if year == `yr' & `depvar' == 1 & axi_pre == 1
+        local tot_ca_axi_pr_`yr' = r(sum)
+        sum dwt if year == `yr' & `depvar' == 1 & worker == 1 & inwork_poor_post == 1
+        local tot_ca_iwp_po_`yr' = r(sum)
+        sum dwt if year == `yr' & `depvar' == 1 & worker == 1 & inwork_poor_pre == 1
+        local tot_ca_iwp_pr_`yr' = r(sum)
+        sum dwt if year == `yr' & `depvar' == 1 & worker == 1 & emp_status == 3 & iwp_emp_post == 1
+        local tot_ca_iwpe_po_`yr' = r(sum)
+        sum dwt if year == `yr' & `depvar' == 1 & worker == 1 & emp_status == 3 & iwp_emp_pre == 1
+        local tot_ca_iwpe_pr_`yr' = r(sum)
+        
+        forvalues ht = 1/10 {
+            
+            local shr_tot_h`ht'_`yr' = .
+            local arop_rt_po_h`ht'_`yr' = .
+            local arop_rt_pr_h`ht'_`yr' = .
+            local shr_arop_po_h`ht'_`yr' = .
+            local shr_arop_pr_h`ht'_`yr' = .
+            local axi_rt_po_h`ht'_`yr' = .
+            local axi_rt_pr_h`ht'_`yr' = .
+            local shr_axi_po_h`ht'_`yr' = .
+            local shr_axi_pr_h`ht'_`yr' = .
+            local iwp_rt_po_h`ht'_`yr' = .
+            local iwp_rt_pr_h`ht'_`yr' = .
+            local shr_iwp_po_h`ht'_`yr' = .
+            local shr_iwp_pr_h`ht'_`yr' = .
+            local iwpe_rt_po_h`ht'_`yr' = .
+            local iwpe_rt_pr_h`ht'_`yr' = .
+            local shr_iwpe_po_h`ht'_`yr' = .
+            local shr_iwpe_pr_h`ht'_`yr' = .
+            
+            quietly count if year == `yr' & `depvar' == 1 & hh_type == `ht'
+            if r(N) == 0 continue
+            
+            sum dwt if year == `yr' & `depvar' == 1 & hh_type == `ht'
+            local n_hh = r(sum)
+            if `tot_ca_`yr'' > 0 {
+                local shr_tot_h`ht'_`yr' = (`n_hh' / `tot_ca_`yr'') * 100
+            }
+            
+            * 1. AROP
+            sum arop_post [aw=dwt] if year == `yr' & `depvar' == 1 & hh_type == `ht'
+            local arop_rt_po_h`ht'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & `depvar' == 1 & hh_type == `ht' & arop_post == 1
+            local n_arop_po = r(sum)
+            if `tot_ca_arop_po_`yr'' > 0 {
+                local shr_arop_po_h`ht'_`yr' = (`n_arop_po' / `tot_ca_arop_po_`yr'') * 100
+            }
+            sum arop_pre [aw=dwt] if year == `yr' & `depvar' == 1 & hh_type == `ht'
+            local arop_rt_pr_h`ht'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & `depvar' == 1 & hh_type == `ht' & arop_pre == 1
+            local n_arop_pr = r(sum)
+            if `tot_ca_arop_pr_`yr'' > 0 {
+                local shr_arop_pr_h`ht'_`yr' = (`n_arop_pr' / `tot_ca_arop_pr_`yr'') * 100
+            }
+            
+            * 2. AROP without IWP
+            sum axi_post [aw=dwt] if year == `yr' & `depvar' == 1 & hh_type == `ht'
+            local axi_rt_po_h`ht'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & `depvar' == 1 & hh_type == `ht' & axi_post == 1
+            local n_axi_po = r(sum)
+            if `tot_ca_axi_po_`yr'' > 0 {
+                local shr_axi_po_h`ht'_`yr' = (`n_axi_po' / `tot_ca_axi_po_`yr'') * 100
+            }
+            sum axi_pre [aw=dwt] if year == `yr' & `depvar' == 1 & hh_type == `ht'
+            local axi_rt_pr_h`ht'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & `depvar' == 1 & hh_type == `ht' & axi_pre == 1
+            local n_axi_pr = r(sum)
+            if `tot_ca_axi_pr_`yr'' > 0 {
+                local shr_axi_pr_h`ht'_`yr' = (`n_axi_pr' / `tot_ca_axi_pr_`yr'') * 100
+            }
+            
+            * 3. IWP
+            quietly count if year == `yr' & `depvar' == 1 & hh_type == `ht' & worker == 1
+            if r(N) > 0 {
+                sum inwork_poor_post [aw=dwt] if year == `yr' & `depvar' == 1 & hh_type == `ht' & worker == 1
+                local iwp_rt_po_h`ht'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & `depvar' == 1 & hh_type == `ht' & worker == 1 & inwork_poor_post == 1
+                local n_iwp_po = r(sum)
+                if `tot_ca_iwp_po_`yr'' > 0 {
+                    local shr_iwp_po_h`ht'_`yr' = (`n_iwp_po' / `tot_ca_iwp_po_`yr'') * 100
+                }
+                sum inwork_poor_pre [aw=dwt] if year == `yr' & `depvar' == 1 & hh_type == `ht' & worker == 1
+                local iwp_rt_pr_h`ht'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & `depvar' == 1 & hh_type == `ht' & worker == 1 & inwork_poor_pre == 1
+                local n_iwp_pr = r(sum)
+                if `tot_ca_iwp_pr_`yr'' > 0 {
+                    local shr_iwp_pr_h`ht'_`yr' = (`n_iwp_pr' / `tot_ca_iwp_pr_`yr'') * 100
+                }
+            }
+            
+            * 4. IWP Employees
+            quietly count if year == `yr' & `depvar' == 1 & hh_type == `ht' & worker == 1 & emp_status == 3
+            if r(N) > 0 {
+                sum iwp_emp_post [aw=dwt] if year == `yr' & `depvar' == 1 & hh_type == `ht' & worker == 1 & emp_status == 3
+                local iwpe_rt_po_h`ht'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & `depvar' == 1 & hh_type == `ht' & worker == 1 & emp_status == 3 & iwp_emp_post == 1
+                local n_iwpe_po = r(sum)
+                if `tot_ca_iwpe_po_`yr'' > 0 {
+                    local shr_iwpe_po_h`ht'_`yr' = (`n_iwpe_po' / `tot_ca_iwpe_po_`yr'') * 100
+                }
+                sum iwp_emp_pre [aw=dwt] if year == `yr' & `depvar' == 1 & hh_type == `ht' & worker == 1 & emp_status == 3
+                local iwpe_rt_pr_h`ht'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & `depvar' == 1 & hh_type == `ht' & worker == 1 & emp_status == 3 & iwp_emp_pre == 1
+                local n_iwpe_pr = r(sum)
+                if `tot_ca_iwpe_pr_`yr'' > 0 {
+                    local shr_iwpe_pr_h`ht'_`yr' = (`n_iwpe_pr' / `tot_ca_iwpe_pr_`yr'') * 100
+                }
+            }
+        }
+    }
+    
+    *===========================================================================
+    * CREATE EXCEL SHEET - BINARY INDICATORS
+    *===========================================================================
+    
+    clear
+    set obs 600
+    
+    gen str100 Indicator = ""
+    foreach yr of local years {
+        gen double Y`yr'_pre = .
+        gen double Y`yr'_post = .
+        gen double Y`yr'_Ch = .
+        gen double Y`yr'_ChPct = .
+    }
+    
+    local row = 1
+    
+    * === OVERALL COVERAGE ===
+    replace Indicator = "=== OVERALL (ALL PERSONS) ===" in `row'
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    replace Indicator = "=== SAMPLE COVERAGE ===" in `row'
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    replace Indicator = "N Total (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_post = `tot_pop_`yr'' in `row'
+    }
+    local row = `row' + 1
+    
+    replace Indicator = "N Total (% of population)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_post = `pct_pop_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    * 1. AROP
+    replace Indicator = "N AROP (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `tot_arop_pr_`yr'' in `row'
+        replace Y`yr'_post = `tot_arop_po_`yr'' in `row'
+        replace Y`yr'_Ch = `tot_arop_po_`yr'' - `tot_arop_pr_`yr'' in `row'
+        if `tot_arop_pr_`yr'' > 0 {
+            replace Y`yr'_ChPct = ((`tot_arop_po_`yr'' - `tot_arop_pr_`yr'') / `tot_arop_pr_`yr'') * 100 in `row'
+        }
+    }
+    local row = `row' + 1
+    replace Indicator = "N AROP (% of all AROP)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `pct_arop_pr_`yr'' in `row'
+        replace Y`yr'_post = `pct_arop_po_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    * 2. AROP without IWP
+    replace Indicator = "N AROP without IWP (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `tot_axi_pr_`yr'' in `row'
+        replace Y`yr'_post = `tot_axi_po_`yr'' in `row'
+        replace Y`yr'_Ch = `tot_axi_po_`yr'' - `tot_axi_pr_`yr'' in `row'
+        if `tot_axi_pr_`yr'' > 0 {
+            replace Y`yr'_ChPct = ((`tot_axi_po_`yr'' - `tot_axi_pr_`yr'') / `tot_axi_pr_`yr'') * 100 in `row'
+        }
+    }
+    local row = `row' + 1
+    replace Indicator = "N AROP without IWP (% of all AROP w/o IWP)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `pct_axi_pr_`yr'' in `row'
+        replace Y`yr'_post = `pct_axi_po_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    * 3. IWP
+    replace Indicator = "N Workers (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_post = `tot_wrk_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "N IWP (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `tot_iwp_pr_`yr'' in `row'
+        replace Y`yr'_post = `tot_iwp_po_`yr'' in `row'
+        replace Y`yr'_Ch = `tot_iwp_po_`yr'' - `tot_iwp_pr_`yr'' in `row'
+        if `tot_iwp_pr_`yr'' > 0 {
+            replace Y`yr'_ChPct = ((`tot_iwp_po_`yr'' - `tot_iwp_pr_`yr'') / `tot_iwp_pr_`yr'') * 100 in `row'
+        }
+    }
+    local row = `row' + 1
+    replace Indicator = "N IWP (% of all IWP)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `pct_iwp_pr_`yr'' in `row'
+        replace Y`yr'_post = `pct_iwp_po_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    * 4. IWP Employees
+    replace Indicator = "N Employees LES==3 (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_post = `tot_emp_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "N IWP Employees (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `tot_iwpe_pr_`yr'' in `row'
+        replace Y`yr'_post = `tot_iwpe_po_`yr'' in `row'
+        replace Y`yr'_Ch = `tot_iwpe_po_`yr'' - `tot_iwpe_pr_`yr'' in `row'
+        if `tot_iwpe_pr_`yr'' > 0 {
+            replace Y`yr'_ChPct = ((`tot_iwpe_po_`yr'' - `tot_iwpe_pr_`yr'') / `tot_iwpe_pr_`yr'') * 100 in `row'
+        }
+    }
+    local row = `row' + 1
+    replace Indicator = "N IWP Employees (% of all IWP Employees)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `pct_iwpe_pr_`yr'' in `row'
+        replace Y`yr'_post = `pct_iwpe_po_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    *--- Category 0 / Category 1 blocks ---
+    forvalues cat = 0/1 {
+        replace Indicator = "=== `cat`cat'_`depvar'' ===" in `row'
+        local row = `row' + 1
+        replace Indicator = "" in `row'
+        local row = `row' + 1
+        
+        replace Indicator = "  Share of population (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_post = `shr_tot_`cat'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 1. AROP
+        replace Indicator = "  AROP rate (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `arop_rt_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `arop_rt_po_`cat'_`yr'' in `row'
+            if `arop_rt_pr_`cat'_`yr'' != . & `arop_rt_po_`cat'_`yr'' != . {
+                replace Y`yr'_Ch = `arop_rt_po_`cat'_`yr'' - `arop_rt_pr_`cat'_`yr'' in `row'
+                if `arop_rt_pr_`cat'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`arop_rt_po_`cat'_`yr'' - `arop_rt_pr_`cat'_`yr'') / `arop_rt_pr_`cat'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at AROP risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_arop_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `shr_arop_po_`cat'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 2. AROP without IWP
+        replace Indicator = "  AROP rate (without IWP) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `axi_rt_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `axi_rt_po_`cat'_`yr'' in `row'
+            if `axi_rt_pr_`cat'_`yr'' != . & `axi_rt_po_`cat'_`yr'' != . {
+                replace Y`yr'_Ch = `axi_rt_po_`cat'_`yr'' - `axi_rt_pr_`cat'_`yr'' in `row'
+                if `axi_rt_pr_`cat'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`axi_rt_po_`cat'_`yr'' - `axi_rt_pr_`cat'_`yr'') / `axi_rt_pr_`cat'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at AROP risk (without IWP) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_axi_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `shr_axi_po_`cat'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 3. IWP
+        replace Indicator = "  IWP rate (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `iwp_rt_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `iwp_rt_po_`cat'_`yr'' in `row'
+            if `iwp_rt_pr_`cat'_`yr'' != . & `iwp_rt_po_`cat'_`yr'' != . {
+                replace Y`yr'_Ch = `iwp_rt_po_`cat'_`yr'' - `iwp_rt_pr_`cat'_`yr'' in `row'
+                if `iwp_rt_pr_`cat'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`iwp_rt_po_`cat'_`yr'' - `iwp_rt_pr_`cat'_`yr'') / `iwp_rt_pr_`cat'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at IWP risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_iwp_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `shr_iwp_po_`cat'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 4. IWP Employees
+        replace Indicator = "  IWP Employees rate (LES==3) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `iwpe_rt_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `iwpe_rt_po_`cat'_`yr'' in `row'
+            if `iwpe_rt_pr_`cat'_`yr'' != . & `iwpe_rt_po_`cat'_`yr'' != . {
+                replace Y`yr'_Ch = `iwpe_rt_po_`cat'_`yr'' - `iwpe_rt_pr_`cat'_`yr'' in `row'
+                if `iwpe_rt_pr_`cat'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`iwpe_rt_po_`cat'_`yr'' - `iwpe_rt_pr_`cat'_`yr'') / `iwpe_rt_pr_`cat'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at IWP Employees risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_iwpe_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `shr_iwpe_po_`cat'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        replace Indicator = "" in `row'
+        local row = `row' + 1
+    }
+    
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    *--- BY SEX ---
+    if `has_sex' {
+        
+        local sex_label_1 "MALE"
+        local sex_label_2 "FEMALE"
+        
+        forvalues sx = 1/2 {
+            
+            replace Indicator = "=== BY SEX: `sex_label_`sx'' ===" in `row'
+            local row = `row' + 1
+            replace Indicator = "" in `row'
+            local row = `row' + 1
+            
+            replace Indicator = "=== SAMPLE COVERAGE - `sex_label_`sx'' ===" in `row'
+            local row = `row' + 1
+            replace Indicator = "" in `row'
+            local row = `row' + 1
+            
+            replace Indicator = "N Total (persons)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_post = `tot_pop_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "N Total (% of population)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_post = `pct_pop_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "" in `row'
+            local row = `row' + 1
+            
+            * 1. AROP
+            replace Indicator = "N AROP (persons)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_pre = `tot_arop_pr_s`sx'_`yr'' in `row'
+                replace Y`yr'_post = `tot_arop_po_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "N AROP (% of all AROP)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_pre = `pct_arop_pr_s`sx'_`yr'' in `row'
+                replace Y`yr'_post = `pct_arop_po_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "" in `row'
+            local row = `row' + 1
+            
+            * 2. AROP without IWP
+            replace Indicator = "N AROP without IWP (persons)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_pre = `tot_axi_pr_s`sx'_`yr'' in `row'
+                replace Y`yr'_post = `tot_axi_po_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "N AROP without IWP (% of all AROP w/o IWP)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_pre = `pct_axi_pr_s`sx'_`yr'' in `row'
+                replace Y`yr'_post = `pct_axi_po_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "" in `row'
+            local row = `row' + 1
+            
+            * 3. IWP
+            replace Indicator = "N Workers (persons)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_post = `tot_wrk_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "N IWP (persons)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_pre = `tot_iwp_pr_s`sx'_`yr'' in `row'
+                replace Y`yr'_post = `tot_iwp_po_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "N IWP (% of all IWP)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_pre = `pct_iwp_pr_s`sx'_`yr'' in `row'
+                replace Y`yr'_post = `pct_iwp_po_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "" in `row'
+            local row = `row' + 1
+            
+            * 4. IWP Employees
+            replace Indicator = "N Employees LES==3 (persons)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_post = `tot_emp_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "N IWP Employees (persons)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_pre = `tot_iwpe_pr_s`sx'_`yr'' in `row'
+                replace Y`yr'_post = `tot_iwpe_po_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "N IWP Employees (% of all IWP Employees)" in `row'
+            foreach yr of local years {
+                replace Y`yr'_pre = `pct_iwpe_pr_s`sx'_`yr'' in `row'
+                replace Y`yr'_post = `pct_iwpe_po_s`sx'_`yr'' in `row'
+            }
+            local row = `row' + 1
+            replace Indicator = "" in `row'
+            local row = `row' + 1
+            replace Indicator = "" in `row'
+            local row = `row' + 1
+            
+            * Category blocks per sex
+            forvalues cat = 0/1 {
+                replace Indicator = "=== `cat`cat'_`depvar'' - `sex_label_`sx'' ===" in `row'
+                local row = `row' + 1
+                replace Indicator = "" in `row'
+                local row = `row' + 1
+                
+                replace Indicator = "  Share of population (%)" in `row'
+                foreach yr of local years {
+                    replace Y`yr'_post = `shr_tot_s`sx'_`cat'_`yr'' in `row'
+                }
+                local row = `row' + 1
+                
+                * 1. AROP
+                replace Indicator = "  AROP rate (%)" in `row'
+                foreach yr of local years {
+                    replace Y`yr'_pre = `arop_rt_pr_s`sx'_`cat'_`yr'' in `row'
+                    replace Y`yr'_post = `arop_rt_po_s`sx'_`cat'_`yr'' in `row'
+                    if `arop_rt_pr_s`sx'_`cat'_`yr'' != . & `arop_rt_po_s`sx'_`cat'_`yr'' != . {
+                        replace Y`yr'_Ch = `arop_rt_po_s`sx'_`cat'_`yr'' - `arop_rt_pr_s`sx'_`cat'_`yr'' in `row'
+                        if `arop_rt_pr_s`sx'_`cat'_`yr'' > 0 {
+                            replace Y`yr'_ChPct = ((`arop_rt_po_s`sx'_`cat'_`yr'' - `arop_rt_pr_s`sx'_`cat'_`yr'') / `arop_rt_pr_s`sx'_`cat'_`yr'') * 100 in `row'
+                        }
+                    }
+                }
+                local row = `row' + 1
+                replace Indicator = "  Share of those at AROP risk (%)" in `row'
+                foreach yr of local years {
+                    replace Y`yr'_pre = `shr_arop_pr_s`sx'_`cat'_`yr'' in `row'
+                    replace Y`yr'_post = `shr_arop_po_s`sx'_`cat'_`yr'' in `row'
+                }
+                local row = `row' + 1
+                
+                * 2. AROP without IWP
+                replace Indicator = "  AROP rate (without IWP) (%)" in `row'
+                foreach yr of local years {
+                    replace Y`yr'_pre = `axi_rt_pr_s`sx'_`cat'_`yr'' in `row'
+                    replace Y`yr'_post = `axi_rt_po_s`sx'_`cat'_`yr'' in `row'
+                    if `axi_rt_pr_s`sx'_`cat'_`yr'' != . & `axi_rt_po_s`sx'_`cat'_`yr'' != . {
+                        replace Y`yr'_Ch = `axi_rt_po_s`sx'_`cat'_`yr'' - `axi_rt_pr_s`sx'_`cat'_`yr'' in `row'
+                        if `axi_rt_pr_s`sx'_`cat'_`yr'' > 0 {
+                            replace Y`yr'_ChPct = ((`axi_rt_po_s`sx'_`cat'_`yr'' - `axi_rt_pr_s`sx'_`cat'_`yr'') / `axi_rt_pr_s`sx'_`cat'_`yr'') * 100 in `row'
+                        }
+                    }
+                }
+                local row = `row' + 1
+                replace Indicator = "  Share of those at AROP risk (without IWP) (%)" in `row'
+                foreach yr of local years {
+                    replace Y`yr'_pre = `shr_axi_pr_s`sx'_`cat'_`yr'' in `row'
+                    replace Y`yr'_post = `shr_axi_po_s`sx'_`cat'_`yr'' in `row'
+                }
+                local row = `row' + 1
+                
+                * 3. IWP
+                replace Indicator = "  IWP rate (%)" in `row'
+                foreach yr of local years {
+                    replace Y`yr'_pre = `iwp_rt_pr_s`sx'_`cat'_`yr'' in `row'
+                    replace Y`yr'_post = `iwp_rt_po_s`sx'_`cat'_`yr'' in `row'
+                    if `iwp_rt_pr_s`sx'_`cat'_`yr'' != . & `iwp_rt_po_s`sx'_`cat'_`yr'' != . {
+                        replace Y`yr'_Ch = `iwp_rt_po_s`sx'_`cat'_`yr'' - `iwp_rt_pr_s`sx'_`cat'_`yr'' in `row'
+                        if `iwp_rt_pr_s`sx'_`cat'_`yr'' > 0 {
+                            replace Y`yr'_ChPct = ((`iwp_rt_po_s`sx'_`cat'_`yr'' - `iwp_rt_pr_s`sx'_`cat'_`yr'') / `iwp_rt_pr_s`sx'_`cat'_`yr'') * 100 in `row'
+                        }
+                    }
+                }
+                local row = `row' + 1
+                replace Indicator = "  Share of those at IWP risk (%)" in `row'
+                foreach yr of local years {
+                    replace Y`yr'_pre = `shr_iwp_pr_s`sx'_`cat'_`yr'' in `row'
+                    replace Y`yr'_post = `shr_iwp_po_s`sx'_`cat'_`yr'' in `row'
+                }
+                local row = `row' + 1
+                
+                * 4. IWP Employees
+                replace Indicator = "  IWP Employees rate (LES==3) (%)" in `row'
+                foreach yr of local years {
+                    replace Y`yr'_pre = `iwpe_rt_pr_s`sx'_`cat'_`yr'' in `row'
+                    replace Y`yr'_post = `iwpe_rt_po_s`sx'_`cat'_`yr'' in `row'
+                    if `iwpe_rt_pr_s`sx'_`cat'_`yr'' != . & `iwpe_rt_po_s`sx'_`cat'_`yr'' != . {
+                        replace Y`yr'_Ch = `iwpe_rt_po_s`sx'_`cat'_`yr'' - `iwpe_rt_pr_s`sx'_`cat'_`yr'' in `row'
+                        if `iwpe_rt_pr_s`sx'_`cat'_`yr'' > 0 {
+                            replace Y`yr'_ChPct = ((`iwpe_rt_po_s`sx'_`cat'_`yr'' - `iwpe_rt_pr_s`sx'_`cat'_`yr'') / `iwpe_rt_pr_s`sx'_`cat'_`yr'') * 100 in `row'
+                        }
+                    }
+                }
+                local row = `row' + 1
+                replace Indicator = "  Share of those at IWP Employees risk (%)" in `row'
+                foreach yr of local years {
+                    replace Y`yr'_pre = `shr_iwpe_pr_s`sx'_`cat'_`yr'' in `row'
+                    replace Y`yr'_post = `shr_iwpe_po_s`sx'_`cat'_`yr'' in `row'
+                }
+                local row = `row' + 1
+                replace Indicator = "" in `row'
+                local row = `row' + 1
+            }
+            
+            replace Indicator = "" in `row'
+            local row = `row' + 1
+        }
+    }
+    
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    *--- BY HOUSEHOLD TYPE - AT RISK (cat=1) ONLY ---
+    replace Indicator = "=== BY HOUSEHOLD TYPE: `cat1_`depvar'' ===" in `row'
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    forvalues ht = 1/10 {
+        
+        replace Indicator = "=== HH Typ `ht': `hh_label_`ht'' ===" in `row'
+        local row = `row' + 1
+        replace Indicator = "" in `row'
+        local row = `row' + 1
+        
+        replace Indicator = "  Share of AT RISK population (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_post = `shr_tot_h`ht'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 1. AROP
+        replace Indicator = "  AROP rate (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `arop_rt_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `arop_rt_po_h`ht'_`yr'' in `row'
+            if `arop_rt_pr_h`ht'_`yr'' != . & `arop_rt_po_h`ht'_`yr'' != . {
+                replace Y`yr'_Ch = `arop_rt_po_h`ht'_`yr'' - `arop_rt_pr_h`ht'_`yr'' in `row'
+                if `arop_rt_pr_h`ht'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`arop_rt_po_h`ht'_`yr'' - `arop_rt_pr_h`ht'_`yr'') / `arop_rt_pr_h`ht'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at AROP risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_arop_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `shr_arop_po_h`ht'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 2. AROP without IWP
+        replace Indicator = "  AROP rate (without IWP) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `axi_rt_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `axi_rt_po_h`ht'_`yr'' in `row'
+            if `axi_rt_pr_h`ht'_`yr'' != . & `axi_rt_po_h`ht'_`yr'' != . {
+                replace Y`yr'_Ch = `axi_rt_po_h`ht'_`yr'' - `axi_rt_pr_h`ht'_`yr'' in `row'
+                if `axi_rt_pr_h`ht'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`axi_rt_po_h`ht'_`yr'' - `axi_rt_pr_h`ht'_`yr'') / `axi_rt_pr_h`ht'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at AROP risk (without IWP) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_axi_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `shr_axi_po_h`ht'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 3. IWP
+        replace Indicator = "  IWP rate (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `iwp_rt_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `iwp_rt_po_h`ht'_`yr'' in `row'
+            if `iwp_rt_pr_h`ht'_`yr'' != . & `iwp_rt_po_h`ht'_`yr'' != . {
+                replace Y`yr'_Ch = `iwp_rt_po_h`ht'_`yr'' - `iwp_rt_pr_h`ht'_`yr'' in `row'
+                if `iwp_rt_pr_h`ht'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`iwp_rt_po_h`ht'_`yr'' - `iwp_rt_pr_h`ht'_`yr'') / `iwp_rt_pr_h`ht'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at IWP risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_iwp_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `shr_iwp_po_h`ht'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 4. IWP Employees
+        replace Indicator = "  IWP Employees rate (LES==3) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `iwpe_rt_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `iwpe_rt_po_h`ht'_`yr'' in `row'
+            if `iwpe_rt_pr_h`ht'_`yr'' != . & `iwpe_rt_po_h`ht'_`yr'' != . {
+                replace Y`yr'_Ch = `iwpe_rt_po_h`ht'_`yr'' - `iwpe_rt_pr_h`ht'_`yr'' in `row'
+                if `iwpe_rt_pr_h`ht'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`iwpe_rt_po_h`ht'_`yr'' - `iwpe_rt_pr_h`ht'_`yr'') / `iwpe_rt_pr_h`ht'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at IWP Employees risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_iwpe_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `shr_iwpe_po_h`ht'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        replace Indicator = "" in `row'
+        local row = `row' + 1
+    }
+    
+    keep if Indicator != ""
+    
+    foreach yr of local years {
+        format Y`yr'_pre %15.2f
+        format Y`yr'_post %15.2f
+        format Y`yr'_Ch %15.2f
+        format Y`yr'_ChPct %15.2f
+    }
+    
+    capture mkdir "$output"
+    
+    local sheet_name "`label_`depvar''"
+    
+    if `sheet_num' == 1 {
+        export excel "$output/Poverty_RX_Indicators_PrePost.xlsx", replace sheet("`sheet_name'") firstrow(variables)
+    }
+    else {
+        export excel "$output/Poverty_RX_Indicators_PrePost.xlsx", sheetmodify sheet("`sheet_name'") firstrow(variables)
+    }
+    
+    di "Sheet `sheet_name' created"
+}
+
+*===============================================================================
+*===============================================================================
+* PART B: RX040 WORK INTENSITY CATEGORIES
+* Categories: 0=Jobless | 1=Very Low (<20) | 2=Low (20-<45) |
+*             3=Medium (45-<55) | 4=High (55-<85) | 5=Full (>=85)
+* HH type decomposition for Jobless (cat=0)
+*===============================================================================
+*===============================================================================
+
+di _n "=== PART B: RX040 Work Intensity Categories ===" _n
+
+use `original_data', clear
+
+capture confirm variable rx040_wi
+if _rc != 0 {
+    di as error "rx040_wi not found, skipping Work Intensity analysis"
+}
+else {
+
+    quietly count if !missing(rx040_wi)
+    if r(N) == 0 {
+        di as error "rx040_wi has no data, skipping"
+    }
+    else {
+
+    local sheet_num = `sheet_num' + 1
+    
+    * Category labels
+    local wi_cat_label_0 "JOBLESS (WI=0)"
+    local wi_cat_label_1 "VERY LOW (0<WI<20)"
+    local wi_cat_label_2 "LOW (20<=WI<45)"
+    local wi_cat_label_3 "MEDIUM (45<=WI<55)"
+    local wi_cat_label_4 "HIGH (55<=WI<85)"
+    local wi_cat_label_5 "FULL (WI>=85)"
+    
+    local wi_cats "0 1 2 3 4 5"
+    
+    *===========================================================================
+    * OVERALL
+    *===========================================================================
+    
+    foreach yr of local years {
+        quietly count if year == `yr' & !missing(rx040_wi)
+        if r(N) == 0 continue
+        
+        sum dwt if year == `yr' & !missing(rx040_wi)
+        local tot_pop_`yr' = r(sum)
+        local pct_pop_`yr' = (`tot_pop_`yr'' / `ref_pop_`yr'') * 100
+        
+        * 1. AROP
+        sum dwt if year == `yr' & !missing(rx040_wi) & arop_post == 1
+        local tot_arop_po_`yr' = r(sum)
+        local pct_arop_po_`yr' = (`tot_arop_po_`yr'' / `ref_arop_po_`yr'') * 100
+        sum dwt if year == `yr' & !missing(rx040_wi) & arop_pre == 1
+        local tot_arop_pr_`yr' = r(sum)
+        local pct_arop_pr_`yr' = (`tot_arop_pr_`yr'' / `ref_arop_pr_`yr'') * 100
+        
+        * 2. AROP without IWP
+        sum dwt if year == `yr' & !missing(rx040_wi) & axi_post == 1
+        local tot_axi_po_`yr' = r(sum)
+        if `ref_axi_po_`yr'' > 0 {
+            local pct_axi_po_`yr' = (`tot_axi_po_`yr'' / `ref_axi_po_`yr'') * 100
+        }
+        else {
+            local pct_axi_po_`yr' = .
+        }
+        sum dwt if year == `yr' & !missing(rx040_wi) & axi_pre == 1
+        local tot_axi_pr_`yr' = r(sum)
+        if `ref_axi_pr_`yr'' > 0 {
+            local pct_axi_pr_`yr' = (`tot_axi_pr_`yr'' / `ref_axi_pr_`yr'') * 100
+        }
+        else {
+            local pct_axi_pr_`yr' = .
+        }
+        
+        * 3. IWP
+        sum dwt if year == `yr' & worker == 1 & !missing(rx040_wi)
+        local tot_wrk_`yr' = r(sum)
+        local pct_wrk_`yr' = (`tot_wrk_`yr'' / `ref_wrk_`yr'') * 100
+        sum dwt if year == `yr' & worker == 1 & !missing(rx040_wi) & inwork_poor_post == 1
+        local tot_iwp_po_`yr' = r(sum)
+        if `ref_iwp_po_`yr'' > 0 {
+            local pct_iwp_po_`yr' = (`tot_iwp_po_`yr'' / `ref_iwp_po_`yr'') * 100
+        }
+        else {
+            local pct_iwp_po_`yr' = .
+        }
+        sum dwt if year == `yr' & worker == 1 & !missing(rx040_wi) & inwork_poor_pre == 1
+        local tot_iwp_pr_`yr' = r(sum)
+        if `ref_iwp_pr_`yr'' > 0 {
+            local pct_iwp_pr_`yr' = (`tot_iwp_pr_`yr'' / `ref_iwp_pr_`yr'') * 100
+        }
+        else {
+            local pct_iwp_pr_`yr' = .
+        }
+        
+        * 4. IWP Employees
+        sum dwt if year == `yr' & worker == 1 & emp_status == 3 & !missing(rx040_wi)
+        local tot_emp_`yr' = r(sum)
+        if `ref_emp_`yr'' > 0 {
+            local pct_emp_`yr' = (`tot_emp_`yr'' / `ref_emp_`yr'') * 100
+        }
+        else {
+            local pct_emp_`yr' = .
+        }
+        sum dwt if year == `yr' & worker == 1 & emp_status == 3 & !missing(rx040_wi) & iwp_emp_post == 1
+        local tot_iwpe_po_`yr' = r(sum)
+        if `ref_iwpe_po_`yr'' > 0 {
+            local pct_iwpe_po_`yr' = (`tot_iwpe_po_`yr'' / `ref_iwpe_po_`yr'') * 100
+        }
+        else {
+            local pct_iwpe_po_`yr' = .
+        }
+        sum dwt if year == `yr' & worker == 1 & emp_status == 3 & !missing(rx040_wi) & iwp_emp_pre == 1
+        local tot_iwpe_pr_`yr' = r(sum)
+        if `ref_iwpe_pr_`yr'' > 0 {
+            local pct_iwpe_pr_`yr' = (`tot_iwpe_pr_`yr'' / `ref_iwpe_pr_`yr'') * 100
+        }
+        else {
+            local pct_iwpe_pr_`yr' = .
+        }
+        
+        * By WI category
+        foreach cat of local wi_cats {
+            
+            quietly count if year == `yr' & rx040_wi == `cat'
+            if r(N) == 0 {
+                local arop_rt_po_`cat'_`yr' = .
+                local arop_rt_pr_`cat'_`yr' = .
+                local shr_tot_`cat'_`yr' = .
+                local shr_arop_po_`cat'_`yr' = .
+                local shr_arop_pr_`cat'_`yr' = .
+                local axi_rt_po_`cat'_`yr' = .
+                local axi_rt_pr_`cat'_`yr' = .
+                local shr_axi_po_`cat'_`yr' = .
+                local shr_axi_pr_`cat'_`yr' = .
+                local iwp_rt_po_`cat'_`yr' = .
+                local iwp_rt_pr_`cat'_`yr' = .
+                local shr_iwp_po_`cat'_`yr' = .
+                local shr_iwp_pr_`cat'_`yr' = .
+                local iwpe_rt_po_`cat'_`yr' = .
+                local iwpe_rt_pr_`cat'_`yr' = .
+                local shr_iwpe_po_`cat'_`yr' = .
+                local shr_iwpe_pr_`cat'_`yr' = .
+                continue
+            }
+            
+            sum dwt if year == `yr' & rx040_wi == `cat'
+            local n_total_cat = r(sum)
+            local shr_tot_`cat'_`yr' = (`n_total_cat' / `tot_pop_`yr'') * 100
+            
+            * 1. AROP
+            sum arop_post [aw=dwt] if year == `yr' & rx040_wi == `cat'
+            local arop_rt_po_`cat'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & rx040_wi == `cat' & arop_post == 1
+            local n_arop_post_cat = r(sum)
+            if `tot_arop_po_`yr'' > 0 {
+                local shr_arop_po_`cat'_`yr' = (`n_arop_post_cat' / `tot_arop_po_`yr'') * 100
+            }
+            else {
+                local shr_arop_po_`cat'_`yr' = .
+            }
+            sum arop_pre [aw=dwt] if year == `yr' & rx040_wi == `cat'
+            local arop_rt_pr_`cat'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & rx040_wi == `cat' & arop_pre == 1
+            local n_arop_pre_cat = r(sum)
+            if `tot_arop_pr_`yr'' > 0 {
+                local shr_arop_pr_`cat'_`yr' = (`n_arop_pre_cat' / `tot_arop_pr_`yr'') * 100
+            }
+            else {
+                local shr_arop_pr_`cat'_`yr' = .
+            }
+            
+            * 2. AROP without IWP
+            sum axi_post [aw=dwt] if year == `yr' & rx040_wi == `cat'
+            local axi_rt_po_`cat'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & rx040_wi == `cat' & axi_post == 1
+            local n_axi_post_cat = r(sum)
+            if `tot_axi_po_`yr'' > 0 {
+                local shr_axi_po_`cat'_`yr' = (`n_axi_post_cat' / `tot_axi_po_`yr'') * 100
+            }
+            else {
+                local shr_axi_po_`cat'_`yr' = .
+            }
+            sum axi_pre [aw=dwt] if year == `yr' & rx040_wi == `cat'
+            local axi_rt_pr_`cat'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & rx040_wi == `cat' & axi_pre == 1
+            local n_axi_pre_cat = r(sum)
+            if `tot_axi_pr_`yr'' > 0 {
+                local shr_axi_pr_`cat'_`yr' = (`n_axi_pre_cat' / `tot_axi_pr_`yr'') * 100
+            }
+            else {
+                local shr_axi_pr_`cat'_`yr' = .
+            }
+            
+            * 3. IWP
+            quietly count if year == `yr' & rx040_wi == `cat' & worker == 1
+            if r(N) > 0 {
+                sum inwork_poor_post [aw=dwt] if year == `yr' & rx040_wi == `cat' & worker == 1
+                local iwp_rt_po_`cat'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & rx040_wi == `cat' & worker == 1 & inwork_poor_post == 1
+                local n_iwp_post_cat = r(sum)
+                if `tot_iwp_po_`yr'' > 0 {
+                    local shr_iwp_po_`cat'_`yr' = (`n_iwp_post_cat' / `tot_iwp_po_`yr'') * 100
+                }
+                else {
+                    local shr_iwp_po_`cat'_`yr' = .
+                }
+                sum inwork_poor_pre [aw=dwt] if year == `yr' & rx040_wi == `cat' & worker == 1
+                local iwp_rt_pr_`cat'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & rx040_wi == `cat' & worker == 1 & inwork_poor_pre == 1
+                local n_iwp_pre_cat = r(sum)
+                if `tot_iwp_pr_`yr'' > 0 {
+                    local shr_iwp_pr_`cat'_`yr' = (`n_iwp_pre_cat' / `tot_iwp_pr_`yr'') * 100
+                }
+                else {
+                    local shr_iwp_pr_`cat'_`yr' = .
+                }
+            }
+            else {
+                local iwp_rt_po_`cat'_`yr' = .
+                local iwp_rt_pr_`cat'_`yr' = .
+                local shr_iwp_po_`cat'_`yr' = .
+                local shr_iwp_pr_`cat'_`yr' = .
+            }
+            
+            * 4. IWP Employees
+            quietly count if year == `yr' & rx040_wi == `cat' & worker == 1 & emp_status == 3
+            if r(N) > 0 {
+                sum iwp_emp_post [aw=dwt] if year == `yr' & rx040_wi == `cat' & worker == 1 & emp_status == 3
+                local iwpe_rt_po_`cat'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & rx040_wi == `cat' & worker == 1 & emp_status == 3 & iwp_emp_post == 1
+                local n_iwpe_post_cat = r(sum)
+                if `tot_iwpe_po_`yr'' > 0 {
+                    local shr_iwpe_po_`cat'_`yr' = (`n_iwpe_post_cat' / `tot_iwpe_po_`yr'') * 100
+                }
+                else {
+                    local shr_iwpe_po_`cat'_`yr' = .
+                }
+                sum iwp_emp_pre [aw=dwt] if year == `yr' & rx040_wi == `cat' & worker == 1 & emp_status == 3
+                local iwpe_rt_pr_`cat'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & rx040_wi == `cat' & worker == 1 & emp_status == 3 & iwp_emp_pre == 1
+                local n_iwpe_pre_cat = r(sum)
+                if `tot_iwpe_pr_`yr'' > 0 {
+                    local shr_iwpe_pr_`cat'_`yr' = (`n_iwpe_pre_cat' / `tot_iwpe_pr_`yr'') * 100
+                }
+                else {
+                    local shr_iwpe_pr_`cat'_`yr' = .
+                }
+            }
+            else {
+                local iwpe_rt_po_`cat'_`yr' = .
+                local iwpe_rt_pr_`cat'_`yr' = .
+                local shr_iwpe_po_`cat'_`yr' = .
+                local shr_iwpe_pr_`cat'_`yr' = .
+            }
+        }
+    }
+    
+    *===========================================================================
+    * BY HOUSEHOLD TYPE - JOBLESS (cat=0) ONLY
+    *===========================================================================
+    
+    di "Calculating HH type for JOBLESS households (WI=0)..."
+    
+    foreach yr of local years {
+        
+        quietly count if year == `yr' & rx040_wi == 0
+        if r(N) == 0 continue
+        
+        sum dwt if year == `yr' & rx040_wi == 0
+        local tot_ca_`yr' = r(sum)
+        
+        sum dwt if year == `yr' & rx040_wi == 0 & arop_post == 1
+        local tot_ca_arop_po_`yr' = r(sum)
+        sum dwt if year == `yr' & rx040_wi == 0 & arop_pre == 1
+        local tot_ca_arop_pr_`yr' = r(sum)
+        sum dwt if year == `yr' & rx040_wi == 0 & axi_post == 1
+        local tot_ca_axi_po_`yr' = r(sum)
+        sum dwt if year == `yr' & rx040_wi == 0 & axi_pre == 1
+        local tot_ca_axi_pr_`yr' = r(sum)
+        sum dwt if year == `yr' & rx040_wi == 0 & worker == 1 & inwork_poor_post == 1
+        local tot_ca_iwp_po_`yr' = r(sum)
+        sum dwt if year == `yr' & rx040_wi == 0 & worker == 1 & inwork_poor_pre == 1
+        local tot_ca_iwp_pr_`yr' = r(sum)
+        sum dwt if year == `yr' & rx040_wi == 0 & worker == 1 & emp_status == 3 & iwp_emp_post == 1
+        local tot_ca_iwpe_po_`yr' = r(sum)
+        sum dwt if year == `yr' & rx040_wi == 0 & worker == 1 & emp_status == 3 & iwp_emp_pre == 1
+        local tot_ca_iwpe_pr_`yr' = r(sum)
+        
+        forvalues ht = 1/10 {
+            
+            local shr_tot_h`ht'_`yr' = .
+            local arop_rt_po_h`ht'_`yr' = .
+            local arop_rt_pr_h`ht'_`yr' = .
+            local shr_arop_po_h`ht'_`yr' = .
+            local shr_arop_pr_h`ht'_`yr' = .
+            local axi_rt_po_h`ht'_`yr' = .
+            local axi_rt_pr_h`ht'_`yr' = .
+            local shr_axi_po_h`ht'_`yr' = .
+            local shr_axi_pr_h`ht'_`yr' = .
+            local iwp_rt_po_h`ht'_`yr' = .
+            local iwp_rt_pr_h`ht'_`yr' = .
+            local shr_iwp_po_h`ht'_`yr' = .
+            local shr_iwp_pr_h`ht'_`yr' = .
+            local iwpe_rt_po_h`ht'_`yr' = .
+            local iwpe_rt_pr_h`ht'_`yr' = .
+            local shr_iwpe_po_h`ht'_`yr' = .
+            local shr_iwpe_pr_h`ht'_`yr' = .
+            
+            quietly count if year == `yr' & rx040_wi == 0 & hh_type == `ht'
+            if r(N) == 0 continue
+            
+            sum dwt if year == `yr' & rx040_wi == 0 & hh_type == `ht'
+            local n_hh = r(sum)
+            if `tot_ca_`yr'' > 0 {
+                local shr_tot_h`ht'_`yr' = (`n_hh' / `tot_ca_`yr'') * 100
+            }
+            
+            * 1. AROP
+            sum arop_post [aw=dwt] if year == `yr' & rx040_wi == 0 & hh_type == `ht'
+            local arop_rt_po_h`ht'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & rx040_wi == 0 & hh_type == `ht' & arop_post == 1
+            local n_arop_po = r(sum)
+            if `tot_ca_arop_po_`yr'' > 0 {
+                local shr_arop_po_h`ht'_`yr' = (`n_arop_po' / `tot_ca_arop_po_`yr'') * 100
+            }
+            sum arop_pre [aw=dwt] if year == `yr' & rx040_wi == 0 & hh_type == `ht'
+            local arop_rt_pr_h`ht'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & rx040_wi == 0 & hh_type == `ht' & arop_pre == 1
+            local n_arop_pr = r(sum)
+            if `tot_ca_arop_pr_`yr'' > 0 {
+                local shr_arop_pr_h`ht'_`yr' = (`n_arop_pr' / `tot_ca_arop_pr_`yr'') * 100
+            }
+            
+            * 2. AROP without IWP
+            sum axi_post [aw=dwt] if year == `yr' & rx040_wi == 0 & hh_type == `ht'
+            local axi_rt_po_h`ht'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & rx040_wi == 0 & hh_type == `ht' & axi_post == 1
+            local n_axi_po = r(sum)
+            if `tot_ca_axi_po_`yr'' > 0 {
+                local shr_axi_po_h`ht'_`yr' = (`n_axi_po' / `tot_ca_axi_po_`yr'') * 100
+            }
+            sum axi_pre [aw=dwt] if year == `yr' & rx040_wi == 0 & hh_type == `ht'
+            local axi_rt_pr_h`ht'_`yr' = r(mean) * 100
+            sum dwt if year == `yr' & rx040_wi == 0 & hh_type == `ht' & axi_pre == 1
+            local n_axi_pr = r(sum)
+            if `tot_ca_axi_pr_`yr'' > 0 {
+                local shr_axi_pr_h`ht'_`yr' = (`n_axi_pr' / `tot_ca_axi_pr_`yr'') * 100
+            }
+            
+            * 3. IWP
+            quietly count if year == `yr' & rx040_wi == 0 & hh_type == `ht' & worker == 1
+            if r(N) > 0 {
+                sum inwork_poor_post [aw=dwt] if year == `yr' & rx040_wi == 0 & hh_type == `ht' & worker == 1
+                local iwp_rt_po_h`ht'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & rx040_wi == 0 & hh_type == `ht' & worker == 1 & inwork_poor_post == 1
+                local n_iwp_po = r(sum)
+                if `tot_ca_iwp_po_`yr'' > 0 {
+                    local shr_iwp_po_h`ht'_`yr' = (`n_iwp_po' / `tot_ca_iwp_po_`yr'') * 100
+                }
+                sum inwork_poor_pre [aw=dwt] if year == `yr' & rx040_wi == 0 & hh_type == `ht' & worker == 1
+                local iwp_rt_pr_h`ht'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & rx040_wi == 0 & hh_type == `ht' & worker == 1 & inwork_poor_pre == 1
+                local n_iwp_pr = r(sum)
+                if `tot_ca_iwp_pr_`yr'' > 0 {
+                    local shr_iwp_pr_h`ht'_`yr' = (`n_iwp_pr' / `tot_ca_iwp_pr_`yr'') * 100
+                }
+            }
+            
+            * 4. IWP Employees
+            quietly count if year == `yr' & rx040_wi == 0 & hh_type == `ht' & worker == 1 & emp_status == 3
+            if r(N) > 0 {
+                sum iwp_emp_post [aw=dwt] if year == `yr' & rx040_wi == 0 & hh_type == `ht' & worker == 1 & emp_status == 3
+                local iwpe_rt_po_h`ht'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & rx040_wi == 0 & hh_type == `ht' & worker == 1 & emp_status == 3 & iwp_emp_post == 1
+                local n_iwpe_po = r(sum)
+                if `tot_ca_iwpe_po_`yr'' > 0 {
+                    local shr_iwpe_po_h`ht'_`yr' = (`n_iwpe_po' / `tot_ca_iwpe_po_`yr'') * 100
+                }
+                sum iwp_emp_pre [aw=dwt] if year == `yr' & rx040_wi == 0 & hh_type == `ht' & worker == 1 & emp_status == 3
+                local iwpe_rt_pr_h`ht'_`yr' = r(mean) * 100
+                sum dwt if year == `yr' & rx040_wi == 0 & hh_type == `ht' & worker == 1 & emp_status == 3 & iwp_emp_pre == 1
+                local n_iwpe_pr = r(sum)
+                if `tot_ca_iwpe_pr_`yr'' > 0 {
+                    local shr_iwpe_pr_h`ht'_`yr' = (`n_iwpe_pr' / `tot_ca_iwpe_pr_`yr'') * 100
+                }
+            }
+        }
+    }
+    
+    *===========================================================================
+    * CREATE EXCEL SHEET - RX040 WORK INTENSITY
+    *===========================================================================
+    
+    clear
+    set obs 800
+    
+    gen str100 Indicator = ""
+    foreach yr of local years {
+        gen double Y`yr'_pre = .
+        gen double Y`yr'_post = .
+        gen double Y`yr'_Ch = .
+        gen double Y`yr'_ChPct = .
+    }
+    
+    local row = 1
+    
+    * === OVERALL COVERAGE ===
+    replace Indicator = "=== OVERALL - RX040 WORK INTENSITY ===" in `row'
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    replace Indicator = "=== SAMPLE COVERAGE ===" in `row'
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    replace Indicator = "N Total (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_post = `tot_pop_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "N Total (% of population)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_post = `pct_pop_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    * 1. AROP
+    replace Indicator = "N AROP (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `tot_arop_pr_`yr'' in `row'
+        replace Y`yr'_post = `tot_arop_po_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "N AROP (% of all AROP)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `pct_arop_pr_`yr'' in `row'
+        replace Y`yr'_post = `pct_arop_po_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    * 2. AROP without IWP
+    replace Indicator = "N AROP without IWP (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `tot_axi_pr_`yr'' in `row'
+        replace Y`yr'_post = `tot_axi_po_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    * 3. IWP
+    replace Indicator = "N Workers (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_post = `tot_wrk_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "N IWP (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `tot_iwp_pr_`yr'' in `row'
+        replace Y`yr'_post = `tot_iwp_po_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    * 4. IWP Employees
+    replace Indicator = "N Employees LES==3 (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_post = `tot_emp_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "N IWP Employees (persons)" in `row'
+    foreach yr of local years {
+        replace Y`yr'_pre = `tot_iwpe_pr_`yr'' in `row'
+        replace Y`yr'_post = `tot_iwpe_po_`yr'' in `row'
+    }
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    *--- WI Category blocks ---
+    foreach cat of local wi_cats {
+        
+        replace Indicator = "=== `wi_cat_label_`cat'' ===" in `row'
+        local row = `row' + 1
+        replace Indicator = "" in `row'
+        local row = `row' + 1
+        
+        replace Indicator = "  Share of population (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_post = `shr_tot_`cat'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 1. AROP
+        replace Indicator = "  AROP rate (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `arop_rt_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `arop_rt_po_`cat'_`yr'' in `row'
+            if `arop_rt_pr_`cat'_`yr'' != . & `arop_rt_po_`cat'_`yr'' != . {
+                replace Y`yr'_Ch = `arop_rt_po_`cat'_`yr'' - `arop_rt_pr_`cat'_`yr'' in `row'
+                if `arop_rt_pr_`cat'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`arop_rt_po_`cat'_`yr'' - `arop_rt_pr_`cat'_`yr'') / `arop_rt_pr_`cat'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at AROP risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_arop_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `shr_arop_po_`cat'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 2. AROP without IWP
+        replace Indicator = "  AROP rate (without IWP) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `axi_rt_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `axi_rt_po_`cat'_`yr'' in `row'
+            if `axi_rt_pr_`cat'_`yr'' != . & `axi_rt_po_`cat'_`yr'' != . {
+                replace Y`yr'_Ch = `axi_rt_po_`cat'_`yr'' - `axi_rt_pr_`cat'_`yr'' in `row'
+                if `axi_rt_pr_`cat'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`axi_rt_po_`cat'_`yr'' - `axi_rt_pr_`cat'_`yr'') / `axi_rt_pr_`cat'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at AROP risk (without IWP) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_axi_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `shr_axi_po_`cat'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 3. IWP
+        replace Indicator = "  IWP rate (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `iwp_rt_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `iwp_rt_po_`cat'_`yr'' in `row'
+            if `iwp_rt_pr_`cat'_`yr'' != . & `iwp_rt_po_`cat'_`yr'' != . {
+                replace Y`yr'_Ch = `iwp_rt_po_`cat'_`yr'' - `iwp_rt_pr_`cat'_`yr'' in `row'
+                if `iwp_rt_pr_`cat'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`iwp_rt_po_`cat'_`yr'' - `iwp_rt_pr_`cat'_`yr'') / `iwp_rt_pr_`cat'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at IWP risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_iwp_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `shr_iwp_po_`cat'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 4. IWP Employees
+        replace Indicator = "  IWP Employees rate (LES==3) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `iwpe_rt_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `iwpe_rt_po_`cat'_`yr'' in `row'
+            if `iwpe_rt_pr_`cat'_`yr'' != . & `iwpe_rt_po_`cat'_`yr'' != . {
+                replace Y`yr'_Ch = `iwpe_rt_po_`cat'_`yr'' - `iwpe_rt_pr_`cat'_`yr'' in `row'
+                if `iwpe_rt_pr_`cat'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`iwpe_rt_po_`cat'_`yr'' - `iwpe_rt_pr_`cat'_`yr'') / `iwpe_rt_pr_`cat'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at IWP Employees risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_iwpe_pr_`cat'_`yr'' in `row'
+            replace Y`yr'_post = `shr_iwpe_po_`cat'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        replace Indicator = "" in `row'
+        local row = `row' + 1
+    }
+    
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    *--- BY HOUSEHOLD TYPE - JOBLESS (cat=0) ONLY ---
+    replace Indicator = "=== BY HOUSEHOLD TYPE: JOBLESS HOUSEHOLDS (WI=0) ===" in `row'
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    forvalues ht = 1/10 {
+        
+        replace Indicator = "=== HH Typ `ht': `hh_label_`ht'' ===" in `row'
+        local row = `row' + 1
+        replace Indicator = "" in `row'
+        local row = `row' + 1
+        
+        replace Indicator = "  Share of JOBLESS population (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_post = `shr_tot_h`ht'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 1. AROP
+        replace Indicator = "  AROP rate (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `arop_rt_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `arop_rt_po_h`ht'_`yr'' in `row'
+            if `arop_rt_pr_h`ht'_`yr'' != . & `arop_rt_po_h`ht'_`yr'' != . {
+                replace Y`yr'_Ch = `arop_rt_po_h`ht'_`yr'' - `arop_rt_pr_h`ht'_`yr'' in `row'
+                if `arop_rt_pr_h`ht'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`arop_rt_po_h`ht'_`yr'' - `arop_rt_pr_h`ht'_`yr'') / `arop_rt_pr_h`ht'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at AROP risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_arop_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `shr_arop_po_h`ht'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 2. AROP without IWP
+        replace Indicator = "  AROP rate (without IWP) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `axi_rt_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `axi_rt_po_h`ht'_`yr'' in `row'
+            if `axi_rt_pr_h`ht'_`yr'' != . & `axi_rt_po_h`ht'_`yr'' != . {
+                replace Y`yr'_Ch = `axi_rt_po_h`ht'_`yr'' - `axi_rt_pr_h`ht'_`yr'' in `row'
+                if `axi_rt_pr_h`ht'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`axi_rt_po_h`ht'_`yr'' - `axi_rt_pr_h`ht'_`yr'') / `axi_rt_pr_h`ht'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at AROP risk (without IWP) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_axi_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `shr_axi_po_h`ht'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 3. IWP
+        replace Indicator = "  IWP rate (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `iwp_rt_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `iwp_rt_po_h`ht'_`yr'' in `row'
+            if `iwp_rt_pr_h`ht'_`yr'' != . & `iwp_rt_po_h`ht'_`yr'' != . {
+                replace Y`yr'_Ch = `iwp_rt_po_h`ht'_`yr'' - `iwp_rt_pr_h`ht'_`yr'' in `row'
+                if `iwp_rt_pr_h`ht'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`iwp_rt_po_h`ht'_`yr'' - `iwp_rt_pr_h`ht'_`yr'') / `iwp_rt_pr_h`ht'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at IWP risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_iwp_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `shr_iwp_po_h`ht'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        * 4. IWP Employees
+        replace Indicator = "  IWP Employees rate (LES==3) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `iwpe_rt_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `iwpe_rt_po_h`ht'_`yr'' in `row'
+            if `iwpe_rt_pr_h`ht'_`yr'' != . & `iwpe_rt_po_h`ht'_`yr'' != . {
+                replace Y`yr'_Ch = `iwpe_rt_po_h`ht'_`yr'' - `iwpe_rt_pr_h`ht'_`yr'' in `row'
+                if `iwpe_rt_pr_h`ht'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`iwpe_rt_po_h`ht'_`yr'' - `iwpe_rt_pr_h`ht'_`yr'') / `iwpe_rt_pr_h`ht'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "  Share of those at IWP Employees risk (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `shr_iwpe_pr_h`ht'_`yr'' in `row'
+            replace Y`yr'_post = `shr_iwpe_po_h`ht'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        replace Indicator = "" in `row'
+        local row = `row' + 1
+    }
+    
+    keep if Indicator != ""
+    
+    foreach yr of local years {
+        format Y`yr'_pre %15.2f
+        format Y`yr'_post %15.2f
+        format Y`yr'_Ch %15.2f
+        format Y`yr'_ChPct %15.2f
+    }
+    
+    export excel "$output/Poverty_RX_Indicators_PrePost.xlsx", sheetmodify sheet("Work_Intensity") firstrow(variables)
+    
+    di "Sheet Work_Intensity created with 6 WI categories"
+    
+    } /* end if rx040_wi has data */
+} /* end if rx040_wi exists */
+
+*===============================================================================
+*===============================================================================
+* PART C: RX070 DETAILED AROPE BREAKDOWN (Supplementary Sheet)
+* Values: 0, 1, 10, 11, 100, 101, 110, 111
+* Shows poverty rates for each AROPE combination
+*===============================================================================
+*===============================================================================
+
+di _n "=== PART C: RX070 Detailed AROPE Breakdown ===" _n
+
+use `original_data', clear
+
+capture confirm variable rx070_detail
+if _rc != 0 {
+    di as error "rx070_detail not found, skipping detailed AROPE"
+}
+else {
+
+    quietly count if !missing(rx070_detail)
+    if r(N) == 0 {
+        di as error "rx070_detail has no data, skipping"
+    }
+    else {
+
+    * Labels for RX070 detailed values
+    * Format: ARP(100s) / Sev.Mat.Dep(10s) / Low.WI(1s)
+    local arope_vals "0 1 10 11 100 101 110 111"
+    local arope_label_0 "Not ARP / Not SMD / No Low WI"
+    local arope_label_1 "Not ARP / Not SMD / Low WI"
+    local arope_label_10 "Not ARP / SMD / No Low WI"
+    local arope_label_11 "Not ARP / SMD / Low WI"
+    local arope_label_100 "ARP / Not SMD / No Low WI"
+    local arope_label_101 "ARP / Not SMD / Low WI"
+    local arope_label_110 "ARP / SMD / No Low WI"
+    local arope_label_111 "ARP / SMD / Low WI"
+    
+    foreach yr of local years {
+        quietly count if year == `yr' & !missing(rx070_detail)
+        if r(N) == 0 continue
+        
+        sum dwt if year == `yr' & !missing(rx070_detail)
+        local tot_pop_`yr' = r(sum)
+        
+        foreach val of local arope_vals {
+            
+            local shr_`val'_`yr' = .
+            local arop_rt_po_`val'_`yr' = .
+            local arop_rt_pr_`val'_`yr' = .
+            local iwp_rt_po_`val'_`yr' = .
+            local iwp_rt_pr_`val'_`yr' = .
+            
+            quietly count if year == `yr' & rx070_detail == `val'
+            if r(N) == 0 continue
+            
+            sum dwt if year == `yr' & rx070_detail == `val'
+            local n_val = r(sum)
+            local shr_`val'_`yr' = (`n_val' / `tot_pop_`yr'') * 100
+            
+            sum arop_post [aw=dwt] if year == `yr' & rx070_detail == `val'
+            local arop_rt_po_`val'_`yr' = r(mean) * 100
+            
+            sum arop_pre [aw=dwt] if year == `yr' & rx070_detail == `val'
+            local arop_rt_pr_`val'_`yr' = r(mean) * 100
+            
+            quietly count if year == `yr' & rx070_detail == `val' & worker == 1
+            if r(N) > 0 {
+                sum inwork_poor_post [aw=dwt] if year == `yr' & rx070_detail == `val' & worker == 1
+                local iwp_rt_po_`val'_`yr' = r(mean) * 100
+                sum inwork_poor_pre [aw=dwt] if year == `yr' & rx070_detail == `val' & worker == 1
+                local iwp_rt_pr_`val'_`yr' = r(mean) * 100
+            }
+        }
+    }
+    
+    * Create Excel sheet
+    clear
+    set obs 100
+    
+    gen str100 Indicator = ""
+    foreach yr of local years {
+        gen double Y`yr'_pre = .
+        gen double Y`yr'_post = .
+        gen double Y`yr'_Ch = .
+        gen double Y`yr'_ChPct = .
+    }
+    
+    local row = 1
+    
+    replace Indicator = "=== RX070 AROPE DETAILED BREAKDOWN ===" in `row'
+    local row = `row' + 1
+    replace Indicator = "Format: ARP (100s) / Sev.Mat.Dep (10s) / Low Work Int (1s)" in `row'
+    local row = `row' + 1
+    replace Indicator = "" in `row'
+    local row = `row' + 1
+    
+    foreach val of local arope_vals {
+        
+        replace Indicator = "=== RX070 = `val': `arope_label_`val'' ===" in `row'
+        local row = `row' + 1
+        replace Indicator = "" in `row'
+        local row = `row' + 1
+        
+        replace Indicator = "  Share of population (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_post = `shr_`val'_`yr'' in `row'
+        }
+        local row = `row' + 1
+        
+        replace Indicator = "  AROP rate (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `arop_rt_pr_`val'_`yr'' in `row'
+            replace Y`yr'_post = `arop_rt_po_`val'_`yr'' in `row'
+            if `arop_rt_pr_`val'_`yr'' != . & `arop_rt_po_`val'_`yr'' != . {
+                replace Y`yr'_Ch = `arop_rt_po_`val'_`yr'' - `arop_rt_pr_`val'_`yr'' in `row'
+                if `arop_rt_pr_`val'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`arop_rt_po_`val'_`yr'' - `arop_rt_pr_`val'_`yr'') / `arop_rt_pr_`val'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        
+        replace Indicator = "  IWP rate (workers only) (%)" in `row'
+        foreach yr of local years {
+            replace Y`yr'_pre = `iwp_rt_pr_`val'_`yr'' in `row'
+            replace Y`yr'_post = `iwp_rt_po_`val'_`yr'' in `row'
+            if `iwp_rt_pr_`val'_`yr'' != . & `iwp_rt_po_`val'_`yr'' != . {
+                replace Y`yr'_Ch = `iwp_rt_po_`val'_`yr'' - `iwp_rt_pr_`val'_`yr'' in `row'
+                if `iwp_rt_pr_`val'_`yr'' > 0 {
+                    replace Y`yr'_ChPct = ((`iwp_rt_po_`val'_`yr'' - `iwp_rt_pr_`val'_`yr'') / `iwp_rt_pr_`val'_`yr'') * 100 in `row'
+                }
+            }
+        }
+        local row = `row' + 1
+        replace Indicator = "" in `row'
+        local row = `row' + 1
+    }
+    
+    keep if Indicator != ""
+    
+    foreach yr of local years {
+        format Y`yr'_pre %15.2f
+        format Y`yr'_post %15.2f
+        format Y`yr'_Ch %15.2f
+        format Y`yr'_ChPct %15.2f
+    }
+    
+    export excel "$output/Poverty_RX_Indicators_PrePost.xlsx", sheetmodify sheet("AROPE_Detail") firstrow(variables)
+    
+    di "Sheet AROPE_Detail created with 8 AROPE combinations"
+    
+    } /* end if has data */
+} /* end if rx070_detail exists */
+
+di as result _n "=== RX INDICATORS ANALYSIS COMPLETE ===" _n
+di "Output: Poverty_RX_Indicators_PrePost.xlsx"
+di "Sheets: Low_Work_Int (RX050), Sev_Mat_Dep (RX060), AROPE (RX070 binary),"
+di "        Work_Intensity (RX040 categories), AROPE_Detail (RX070 8 combinations)"

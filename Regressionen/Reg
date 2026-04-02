@@ -1,0 +1,129 @@
+*===============================================================================
+* REGRESSION: IWP Employees vs. AROP w/o IWP - 2018-2024
+* ÄNDERUNG: AROP w/o IWP Referenzgruppe auf 18-64 beschränkt
+*           (konsistent mit HH-Typ und Kontroll-Regressionen)
+*===============================================================================
+
+use "D:\Data\AT_CROSS\SILC_CrossSec_AllYears_2015_2024.dta", clear
+
+global output "D:\InWorkPoverty_SILC"
+
+*--- Destring ---
+foreach var in HX090 HY023 HX050 RB050 RX010 PL073 PL074 PL075 PL076 year PL040 PL040A PD020 PD030 PD050 PD060 PD070 PD080 HS040 HS050 HS060 HS011 HS021 HS031 HH050 RX060 {
+    capture confirm string variable `var'
+    if _rc == 0 {
+        replace `var' = subinstr(`var', ",", ".", .)
+        destring `var', replace force
+    }
+}
+
+*--- Grundvariablen ---
+gen dwt = RB050
+gen age = RX010
+
+gen months_worked = 0
+foreach var in PL073 PL074 PL075 PL076 {
+    capture confirm variable `var'
+    if _rc == 0 replace months_worked = months_worked + `var' if !missing(`var')
+}
+replace months_worked = 12 if months_worked > 12 & !missing(months_worked)
+
+drop if missing(HX090) | missing(dwt) | missing(age)
+keep if inrange(year, 2018, 2024)
+
+*--- Erwerbsstatus ---
+gen emp_status = .
+replace emp_status = PL040  if inrange(year, 2015, 2020)
+replace emp_status = PL040A if inrange(year, 2021, 2024)
+
+*--- Armutsschwelle ---
+tempfile thr
+tempname h
+postfile `h' int year double pov_threshold_60 using `thr', replace
+levelsof year, local(yrs)
+foreach yr of local yrs {
+    quietly _pctile HX090 [pw=dwt] if year==`yr', p(50)
+    post `h' (`yr') (0.60 * r(r1))
+}
+postclose `h'
+merge m:1 year using `thr', nogen keep(1 3)
+
+*--- Armutsstatus ---
+gen arop_post        = (HX090 < pov_threshold_60) if !missing(pov_threshold_60)
+gen worker           = (months_worked > 6 & age >= 18 & age <= 64)
+gen inwork_poor_post = (worker == 1 & arop_post == 1)
+gen axi_post         = (arop_post == 1 & inwork_poor_post == 0)
+gen iwp_emp_post     = (inwork_poor_post == 1 & emp_status == 3)
+
+*--- Gruppe & Sample (ÄNDERUNG: 18-64 für beide Gruppen) ---
+gen byte iwp_group = .
+replace iwp_group = 0 if axi_post == 1 & age >= 18 & age <= 64
+replace iwp_group = 1 if iwp_emp_post == 1
+label define grp 0 "AROP w/o IWP (18-64)" 1 "IWP Employees"
+label values iwp_group grp
+
+gen sample = (!missing(iwp_group))
+
+*--- Deprivationsvariablen ---
+gen dep_clothes  = (PD020 == 2) if !missing(PD020)
+gen dep_shoes    = (PD030 == 2) if !missing(PD030)
+gen dep_social   = (PD050 == 2) if !missing(PD050)
+gen dep_leisure  = (PD060 == 2) if !missing(PD060)
+gen dep_pocket   = (PD070 == 2) if !missing(PD070)
+gen dep_internet = (PD080 == 2) if !missing(PD080)
+gen dep_holiday  = (HS040 == 2) if !missing(HS040)
+gen dep_meat     = (HS050 == 2) if !missing(HS050)
+gen dep_unexp    = (HS060 == 2) if !missing(HS060)
+gen dep_rent     = (HS011 == 1) if !missing(HS011)
+gen dep_util     = (HS021 == 1) if !missing(HS021)
+gen dep_loan     = (HS031 == 1) if !missing(HS031)
+gen dep_warm     = (HH050 == 2) if !missing(HH050)
+gen dep_smd      = (RX060 == 1) if !missing(RX060)
+
+*--- svyset ---
+svyset [pw=dwt], vce(linearized)
+
+*===============================================================================
+* REGRESSIONEN - GESAMT
+*===============================================================================
+
+di _n "=== Stichprobe ==="
+tab iwp_group if sample == 1
+
+svy, subpop(sample): logistic dep_smd      i.iwp_group ib2018.year
+est store smd
+svy, subpop(sample): logistic dep_clothes  i.iwp_group ib2018.year
+est store clothes
+svy, subpop(sample): logistic dep_shoes    i.iwp_group ib2018.year
+est store shoes
+svy, subpop(sample): logistic dep_social   i.iwp_group ib2018.year
+est store social
+svy, subpop(sample): logistic dep_leisure  i.iwp_group ib2018.year
+est store leisure
+svy, subpop(sample): logistic dep_pocket   i.iwp_group ib2018.year
+est store pocket
+svy, subpop(sample): logistic dep_internet i.iwp_group ib2018.year
+est store internet
+svy, subpop(sample): logistic dep_holiday  i.iwp_group ib2018.year
+est store holiday
+svy, subpop(sample): logistic dep_meat     i.iwp_group ib2018.year
+est store meat
+svy, subpop(sample): logistic dep_unexp    i.iwp_group ib2018.year
+est store unexp
+svy, subpop(sample): logistic dep_rent     i.iwp_group ib2018.year
+est store rent
+svy, subpop(sample): logistic dep_util     i.iwp_group ib2018.year
+est store util
+svy, subpop(sample): logistic dep_loan     i.iwp_group ib2018.year
+est store loan
+svy, subpop(sample): logistic dep_warm     i.iwp_group ib2018.year
+est store warm
+
+*--- Konsole anzeigen ---
+di _n "=== ERGEBNISSE GESAMT (18-64) ==="
+esttab smd clothes shoes social leisure pocket internet holiday meat unexp rent util loan warm, eform ci nostar keep(1.iwp_group) coeflabels(1.iwp_group "OR: IWP vs. AROP w/o IWP (18-64)") title("Logistische Regression Gesamt 2018-2024 (18-64)")
+
+*--- In Datei speichern ---
+esttab smd clothes shoes social leisure pocket internet holiday meat unexp rent util loan warm using "$output/Regression_Gesamt.csv", eform ci nostar replace keep(1.iwp_group) coeflabels(1.iwp_group "OR: IWP vs. AROP w/o IWP (18-64)") title("Logistische Regression Gesamt 2018-2024 (18-64)") note("OR mit 95% KI. Ref: AROP w/o IWP (18-64). Jahres-FE (Ref: 2018). svy-gewichtet.")
+
+di as result "=== GESAMT FERTIG ==="

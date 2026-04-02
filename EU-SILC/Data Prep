@@ -1,0 +1,88 @@
+*******************************************************************************************************************************************************************************************
+*** Titel: Merge EU-SILC Cross-sectional data for Austria 2015-2023
+*** Date: 16.01.2026 (Updated - uses standard SILC variable names)
+*** Aim: Merge R, D, H, P files for each year and append all years
+*** Note: All files standardized to PB030 (person ID) and PX030 (household ID) for merging
+*******************************************************************************************************************************************************************************************
+clear all
+set more off
+
+global input "D:\Data\AT_CROSS"
+global output "D:\Data\AT_CROSS"
+
+local years "2015 2016 2017 2018 2019 2020 2021 2022 2023 2024"
+
+* Loop through each year and merge files
+local first_year = 1
+
+foreach yr of local years {
+
+    di _n "=== Processing Year `yr' ===" _n
+
+    * Create short year (15, 16, 17, ...)
+    local yr_short = substr("`yr'", 3, 2)
+
+    * H-Datei (Household)
+    import delimited "$input/`yr'/UDB_cAT`yr_short'H.csv", delimiter(",") clear case(preserve)
+    rename HB030 id_hh
+    tempfile household
+    save `household'
+
+    * D-Datei (Household)
+    import delimited "$input/`yr'/UDB_cAT`yr_short'D.csv", delimiter(",") clear case(preserve)
+    rename DB030 id_hh
+    tempfile demographic_hh
+    save `demographic_hh'
+
+    * R-Datei (Personal)
+    import delimited "$input/`yr'/UDB_cAT`yr_short'R.csv", delimiter(",") clear case(preserve)
+    rename RB030 person_id
+    rename RX030 id_hh
+    tempfile register
+    save `register'
+
+    * P-Datei (Personal) - Master (already has PB030 and PX030)
+    import delimited "$input/`yr'/UDB_cAT`yr_short'P.csv", delimiter(",") clear case(preserve)
+    rename PB030 person_id
+    rename PX030 id_hh
+    
+    * Merge personal files
+    merge 1:1 person_id using `register'
+    drop _merge
+    
+    * Merge household files
+    merge m:1 id_hh using `household'
+    drop _merge
+    
+    merge m:1 id_hh using `demographic_hh'
+    drop _merge
+
+    * Add year
+    gen year = `yr'
+
+    di "Year `yr' merged: " _N " observations"
+
+    * Append to combined dataset
+    if `first_year' == 1 {
+        tempfile alldata
+        save `alldata'
+        local first_year = 0
+    }
+    else {
+        append using `alldata'
+        save `alldata', replace
+    }
+}
+
+* WICHTIG: Load the combined data before saving!
+use `alldata', clear
+
+* Save final combined dataset
+save "$output/SILC_CrossSec_AllYears_2015_2024.dta", replace
+
+di _n "==============================================================================="
+di "COMPLETE!"
+di "==============================================================================="
+di "Total observations: " _N
+tab year
+di "==============================================================================="

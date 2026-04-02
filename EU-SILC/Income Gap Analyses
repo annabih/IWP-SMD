@@ -1,0 +1,716 @@
+*******************************************************************************************************************************************************************************************
+*** Titel: Income Gap Analyses
+*** Date: 2026
+*** Aim: Three output tables after Do-File 1 (Combined Poverty Analysis)
+***      Table 2: Gap Distribution (pooled 2018-2024)
+***      Table 3: Poverty Indicators by Year - large version with Delta
+***      Table 4: Poverty Indicators by Year - small version with YoY
+***      Table 5: Distribution of Monthly Income Gap by Year 
+*** IMPORTANT: Run directly after Do-File 1 in the same Stata session
+***            All locals (axipre_, axi_, iwpepre_, iwpe_, etc.) must be in memory
+***            Data (ALL_POV_IND_SILC_PrePost_HH.dta) must still be loaded
+*******************************************************************************************************************************************************************************************
+
+di _n "=== STARTING DO-FILE 5: INCOME GAP TABLES ===" _n
+di "Requires: Do-File 1 locals in memory + data still loaded"
+
+* Verify key variables exist
+foreach var in axipre_ga axi_ga iwpepre_ga iwpe_ga arop_excl_iwp_pre arop_excl_iwp iwp_emp_pre iwp_emp dwt year {
+    capture confirm variable `var'
+    if _rc != 0 {
+        di as error "ERROR: Variable `var' not found. Run Do-File 1 first."
+        exit 1
+    }
+}
+di "Variable check passed." _n
+
+local years "2018 2019 2020 2021 2022 2023 2024"
+
+*===============================================================================
+* TABLE 2: Distribution of Monthly Income Gap (pooled 2018-2024)
+*===============================================================================
+di _n "=== TABLE 2: Gap Distribution (pooled 2018-2024) ===" _n
+
+* Monthly gap variables
+capture drop gap_axi_pre_m gap_axi_post_m gap_iwp_pre_m gap_iwp_post_m
+gen gap_axi_pre_m  = axipre_ga / 12  if axipre_ga  > 0 & !missing(axipre_ga)
+gen gap_axi_post_m = axi_ga    / 12  if axi_ga     > 0 & !missing(axi_ga)
+gen gap_iwp_pre_m  = iwpepre_ga / 12 if iwpepre_ga > 0 & !missing(iwpepre_ga)
+gen gap_iwp_post_m = iwpe_ga   / 12  if iwpe_ga    > 0 & !missing(iwpe_ga)
+
+* Pool indicator: 2018-2024, NO age restriction for axi (consistent with income section)
+capture drop axi_pre_pool axi_post_pool iwp_pre_pool iwp_post_pool
+gen axi_pre_pool  = (arop_excl_iwp_pre == 1) if inlist(year, 2018,2019,2020,2021,2022,2023,2024)
+gen axi_post_pool = (arop_excl_iwp == 1)     if inlist(year, 2018,2019,2020,2021,2022,2023,2024)
+gen iwp_pre_pool  = (iwp_emp_pre == 1)       if inlist(year, 2018,2019,2020,2021,2022,2023,2024)
+gen iwp_post_pool = (iwp_emp == 1)           if inlist(year, 2018,2019,2020,2021,2022,2023,2024)
+
+* Print results to screen
+di _n "================================================"
+di "TABLE 2: Income Gap Distribution (pooled 2018-2024)"
+di "================================================"
+
+foreach grp in "axi_pre" "axi_post" "iwp_pre" "iwp_post" {
+
+    local gvar   "gap_`grp'_m"
+    local cond   "`grp'_pool == 1 & !missing(`gvar')"
+
+    if "`grp'" == "axi_pre"  local title "AROP w/o IWP -- Pre Transfer"
+    if "`grp'" == "axi_post" local title "AROP w/o IWP -- Post Transfer"
+    if "`grp'" == "iwp_pre"  local title "IWP Employees -- Pre Transfer"
+    if "`grp'" == "iwp_post" local title "IWP Employees -- Post Transfer"
+
+    di _n "--- `title' ---"
+
+    quietly sum dwt if `cond'
+    local tot = r(sum)
+
+    foreach lo_hi in "0 50" "50 100" "100 200" "200 300" "300 400" "400 500" "500 700" "700 1000" {
+        local lo = word("`lo_hi'", 1)
+        local hi = word("`lo_hi'", 2)
+        quietly sum dwt if `cond' & `gvar' >= `lo' & `gvar' < `hi'
+        di %6.0f `lo' "--" %4.0f `hi' " EUR:  " %6.1f (`r(sum)'/`tot'*100) "%"
+    }
+    quietly sum dwt if `cond' & `gvar' >= 1000
+    di "1000+     EUR:  " %6.1f (`r(sum)'/`tot'*100) "%"
+
+    quietly sum `gvar' [aw=dwt] if `cond'
+    di "Mean:          " %7.0f r(mean) " EUR"
+    quietly _pctile `gvar' [pw=dwt] if `cond', p(50)
+    di "Median:        " %7.0f r(r1)   " EUR"
+}
+
+* Store bracket values for LaTeX output
+foreach grp in "axi_pre" "axi_post" "iwp_pre" "iwp_post" {
+    local gvar "gap_`grp'_m"
+    local cond "`grp'_pool == 1 & !missing(`gvar')"
+
+    quietly sum dwt if `cond'
+    local tot_`grp' = r(sum)
+
+    local i = 0
+    foreach lo_hi in "0 50" "50 100" "100 200" "200 300" "300 400" "400 500" "500 700" "700 1000" {
+        local lo = word("`lo_hi'", 1)
+        local hi = word("`lo_hi'", 2)
+        local i = `i' + 1
+        quietly sum dwt if `cond' & `gvar' >= `lo' & `gvar' < `hi'
+        local b`i'_`grp' = r(sum) / `tot_`grp'' * 100
+    }
+    quietly sum dwt if `cond' & `gvar' >= 1000
+    local b9_`grp' = r(sum) / `tot_`grp'' * 100
+
+    quietly sum `gvar' [aw=dwt] if `cond'
+    local mean_`grp' = round(r(mean), 1)
+    quietly _pctile `gvar' [pw=dwt] if `cond', p(50)
+    local median_`grp' = round(r(r1), 1)
+}
+
+* Write LaTeX Table 2
+file open tex using "$output/table2_gap_distribution.tex", write replace
+
+file write tex "\begin{table}[H]" _n
+file write tex "\centering" _n
+file write tex "\caption{Distribution of Monthly Income Gap to Poverty Threshold (2018--2024)}" _n
+file write tex "\begin{tabular}{lrrrr}" _n
+file write tex "\hline" _n
+file write tex " & \multicolumn{2}{c}{AROP w/o IWP} & \multicolumn{2}{c}{IWP Employees} \\" _n
+file write tex "Gap (EUR/Monat) & Pre Transfer & Post Transfer & Pre Transfer & Post Transfer \\" _n
+file write tex "\hline" _n
+
+foreach lo_hi_label in "0--50\,\euro{}" "50--100\,\euro{}" "100--200\,\euro{}" "200--300\,\euro{}" "300--400\,\euro{}" "400--500\,\euro{}" "500--700\,\euro{}" "700--1000\,\euro{}" {
+    local i = `i'
+}
+
+local labels `"0--50\,\euro{}" "50--100\,\euro{}" "100--200\,\euro{}" "200--300\,\euro{}" "300--400\,\euro{}" "400--500\,\euro{}" "500--700\,\euro{}" "700--1000\,\euro{}" "1000+\,\euro{}"'
+
+forvalues i = 1/9 {
+    local lab: word `i' of `labels'
+    file write tex "`lab'"
+    foreach grp in "axi_pre" "axi_post" "iwp_pre" "iwp_post" {
+        file write tex " & " %5.1f (`b`i'_`grp'') "\%"
+    }
+    file write tex " \\" _n
+}
+
+file write tex "\hline" _n
+file write tex "Median"
+foreach grp in "axi_pre" "axi_post" "iwp_pre" "iwp_post" {
+    file write tex " & " %6.0f (`median_`grp'') "\,\euro{}"
+}
+file write tex " \\" _n
+file write tex "Mean"
+foreach grp in "axi_pre" "axi_post" "iwp_pre" "iwp_post" {
+    file write tex " & " %6.0f (`mean_`grp'') "\,\euro{}"
+}
+file write tex " \\" _n
+file write tex "\hline" _n
+file write tex "\end{tabular}" _n
+file write tex "\begin{flushleft}" _n
+file write tex "\footnotesize" _n
+file write tex "Notes: Share of poor population within each gap bracket. AROP w/o IWP: " _n
+file write tex "at-risk-of-poverty excluding in-work poor. IWP Employees: in-work poor employees " _n
+file write tex "(LES==3). Source: EU-SILC Austria, own calculations." _n
+file write tex "\end{flushleft}" _n
+file write tex "\end{table}" _n
+
+file close tex
+di "Table 2 saved: $output/table2_gap_distribution.tex"
+
+* Cleanup temp variables
+drop gap_axi_pre_m gap_axi_post_m gap_iwp_pre_m gap_iwp_post_m
+drop axi_pre_pool axi_post_pool iwp_pre_pool iwp_post_pool
+
+*===============================================================================
+* TABLE 3: Poverty Indicators by Year - large version (with Delta pre/post)
+*===============================================================================
+di _n "=== TABLE 3: Poverty Indicators by Year (large) ===" _n
+
+* Compute median gaps per year
+foreach yr of local years {
+    _pctile axipre_ga [pw=dwt] if year==`yr' & axipre_ga > 0 & !missing(axipre_ga), p(50)
+    local medaxipre_`yr' = round(r(r1)/12, 1)
+    _pctile axi_ga [pw=dwt] if year==`yr' & axi_ga > 0 & !missing(axi_ga), p(50)
+    local medaxi_`yr' = round(r(r1)/12, 1)
+    _pctile iwpepre_ga [pw=dwt] if year==`yr' & iwpepre_ga > 0 & !missing(iwpepre_ga), p(50)
+    local mediwpepre_`yr' = round(r(r1)/12, 1)
+    _pctile iwpe_ga [pw=dwt] if year==`yr' & iwpe_ga > 0 & !missing(iwpe_ga), p(50)
+    local mediwpe_`yr' = round(r(r1)/12, 1)
+
+    * Pre-Post reductions
+    local axirate_red_`yr'  = round(`axipre_`yr'' - `axi_`yr'', 0.01)
+    local axirate_redp_`yr' = round((`axipre_`yr'' - `axi_`yr'') / `axipre_`yr'' * 100, 0.01)
+    local axigap_red_`yr'   = round(`axipre_gam_`yr'' - `axigam_`yr'', 1)
+    local axigap_redp_`yr'  = round((`axipre_gam_`yr'' - `axigam_`yr'') / `axipre_gam_`yr'' * 100, 0.01)
+
+    local iwperate_red_`yr'  = round(`iwpepre_`yr'' - `iwpe_`yr'', 0.01)
+    local iwperate_redp_`yr' = round((`iwpepre_`yr'' - `iwpe_`yr'') / `iwpepre_`yr'' * 100, 0.01)
+    local iwpegap_red_`yr'   = round(`iwpepre_gam_`yr'' - `iwpegam_`yr'', 1)
+    local iwpegap_redp_`yr'  = round((`iwpepre_gam_`yr'' - `iwpegam_`yr'') / `iwpepre_gam_`yr'' * 100, 0.01)
+}
+
+file open tex using "$output/table3_poverty_by_year_large.tex", write replace
+
+file write tex "\begin{table}[H]" _n
+file write tex "\centering" _n
+file write tex "\caption{Poverty Indicators by Year (2018--2024)}" _n
+file write tex "\resizebox{\textwidth}{!}{%" _n
+file write tex "\begin{tabular}{lrrrrrrr}" _n
+file write tex "\hline" _n
+file write tex " & 2018 & 2019 & 2020 & 2021 & 2022 & 2023 & 2024 \\" _n
+file write tex "\hline" _n
+file write tex "\multicolumn{8}{l}{\textit{AROP w/o IWP}} \\" _n
+file write tex "\hline" _n
+
+* Rate Pre
+file write tex "Rate Pre (\%)"
+foreach yr of local years {
+    file write tex " & " %5.2f (`axipre_`yr'')
+}
+file write tex " \\" _n
+
+* Rate Post
+file write tex "Rate Post (\%)"
+foreach yr of local years {
+    file write tex " & " %5.2f (`axi_`yr'')
+}
+file write tex " \\" _n
+
+* Delta PP
+file write tex "\hspace{1em} \$\Delta\$ (PP)"
+foreach yr of local years {
+    file write tex " & " %5.2f (`axirate_red_`yr'')
+}
+file write tex " \\" _n
+
+* Delta %
+file write tex "\hspace{1em} \$\Delta\$ (\%)"
+foreach yr of local years {
+    file write tex " & " %5.1f (`axirate_redp_`yr'')
+}
+file write tex " \\" _n
+
+* Mean Gap Pre
+file write tex "Mean Gap Pre (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`axipre_gam_`yr'')
+}
+file write tex " \\" _n
+
+* Mean Gap Post
+file write tex "Mean Gap Post (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`axigam_`yr'')
+}
+file write tex " \\" _n
+
+* Delta EUR
+file write tex "\hspace{1em} \$\Delta\$ (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`axigap_red_`yr'')
+}
+file write tex " \\" _n
+
+* Delta % gap
+file write tex "\hspace{1em} \$\Delta\$ (\%)"
+foreach yr of local years {
+    file write tex " & " %5.1f (`axigap_redp_`yr'')
+}
+file write tex " \\" _n
+
+* Median Gap Post
+file write tex "Median Gap Post (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`medaxi_`yr'')
+}
+file write tex " \\" _n
+
+file write tex "\hline" _n
+file write tex "\multicolumn{8}{l}{\textit{IWP Employees}} \\" _n
+file write tex "\hline" _n
+
+* IWP Rate Pre
+file write tex "Rate Pre (\%)"
+foreach yr of local years {
+    file write tex " & " %5.2f (`iwpepre_`yr'')
+}
+file write tex " \\" _n
+
+* IWP Rate Post
+file write tex "Rate Post (\%)"
+foreach yr of local years {
+    file write tex " & " %5.2f (`iwpe_`yr'')
+}
+file write tex " \\" _n
+
+* IWP Delta PP
+file write tex "\hspace{1em} \$\Delta\$ (PP)"
+foreach yr of local years {
+    file write tex " & " %5.2f (`iwperate_red_`yr'')
+}
+file write tex " \\" _n
+
+* IWP Delta %
+file write tex "\hspace{1em} \$\Delta\$ (\%)"
+foreach yr of local years {
+    file write tex " & " %5.1f (`iwperate_redp_`yr'')
+}
+file write tex " \\" _n
+
+* IWP Mean Gap Pre
+file write tex "Mean Gap Pre (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`iwpepre_gam_`yr'')
+}
+file write tex " \\" _n
+
+* IWP Mean Gap Post
+file write tex "Mean Gap Post (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`iwpegam_`yr'')
+}
+file write tex " \\" _n
+
+* IWP Delta EUR
+file write tex "\hspace{1em} \$\Delta\$ (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`iwpegap_red_`yr'')
+}
+file write tex " \\" _n
+
+* IWP Delta % gap
+file write tex "\hspace{1em} \$\Delta\$ (\%)"
+foreach yr of local years {
+    file write tex " & " %5.1f (`iwpegap_redp_`yr'')
+}
+file write tex " \\" _n
+
+* IWP Median Gap Post
+file write tex "Median Gap Post (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`mediwpe_`yr'')
+}
+file write tex " \\" _n
+
+file write tex "\hline" _n
+file write tex "\end{tabular}}" _n
+file write tex "\begin{flushleft}" _n
+file write tex "\footnotesize" _n
+file write tex "Notes: AROP w/o IWP: at-risk-of-poverty excluding in-work poor. " _n
+file write tex "IWP Employees: in-work poor employees (LES==3). " _n
+file write tex "\$\Delta\$ = Reduction pre to post transfer. PP = percentage points. " _n
+file write tex "Mean and Median Gap in EUR per month. " _n
+file write tex "Source: EU-SILC Austria, own calculations." _n
+file write tex "\end{flushleft}" _n
+file write tex "\end{table}" _n
+
+file close tex
+di "Table 3 saved: $output/table3_poverty_by_year_large.tex"
+
+*===============================================================================
+* TABLE 4: Poverty Indicators by Year - small version (YoY changes)
+*===============================================================================
+di _n "=== TABLE 4: Poverty Indicators by Year (small, YoY) ===" _n
+
+* YoY Deltas
+local prev = ""
+foreach yr of local years {
+    if "`prev'" != "" {
+        local axi_yoy_rate_pre_`yr'  = round(`axipre_`yr'' - `axipre_`prev'', 0.01)
+        local axi_yoy_rate_post_`yr' = round(`axi_`yr'' - `axi_`prev'', 0.01)
+        local axi_yoy_gap_pre_`yr'   = round(`axipre_gam_`yr'' - `axipre_gam_`prev'', 1)
+        local axi_yoy_gap_post_`yr'  = round(`axigam_`yr'' - `axigam_`prev'', 1)
+
+        local iwpe_yoy_rate_pre_`yr'  = round(`iwpepre_`yr'' - `iwpepre_`prev'', 0.01)
+        local iwpe_yoy_rate_post_`yr' = round(`iwpe_`yr'' - `iwpe_`prev'', 0.01)
+        local iwpe_yoy_gap_pre_`yr'   = round(`iwpepre_gam_`yr'' - `iwpepre_gam_`prev'', 1)
+        local iwpe_yoy_gap_post_`yr'  = round(`iwpegam_`yr'' - `iwpegam_`prev'', 1)
+    }
+    local prev "`yr'"
+}
+
+* Transfer Reduction %
+foreach yr of local years {
+    local axi_tr_rate_`yr'  = round((`axipre_`yr'' - `axi_`yr'') / `axipre_`yr'' * 100, 0.1)
+    local axi_tr_gap_`yr'   = round((`axipre_gam_`yr'' - `axigam_`yr'') / `axipre_gam_`yr'' * 100, 0.1)
+    local iwpe_tr_rate_`yr' = round((`iwpepre_`yr'' - `iwpe_`yr'') / `iwpepre_`yr'' * 100, 0.1)
+    local iwpe_tr_gap_`yr'  = round((`iwpepre_gam_`yr'' - `iwpegam_`yr'') / `iwpepre_gam_`yr'' * 100, 0.1)
+}
+
+file open tex using "$output/table4_poverty_by_year_small.tex", write replace
+
+file write tex "\begin{table}[H]" _n
+file write tex "\centering" _n
+file write tex "\caption{Poverty Indicators by Year}" _n
+file write tex "\resizebox{\textwidth}{!}{%" _n
+file write tex "\begin{tabular}{lrrrrrrr}" _n
+file write tex "\hline" _n
+file write tex " & 2018 & 2019 & 2020 & 2021 & 2022 & 2023 & 2024 \\" _n
+file write tex "\hline" _n
+
+*--- Not Working Poor (AROP w/o IWP) ---
+file write tex "\multicolumn{8}{l}{\textit{Not Working Poor}} \\" _n
+file write tex "\hline" _n
+
+* Pre rate
+file write tex "Pre (\%)"
+foreach yr of local years {
+    file write tex " & " %5.2f (`axipre_`yr'')
+}
+file write tex " \\" _n
+
+* YoY Pre
+file write tex "\hspace{1em} YoY \$\Delta\$"
+foreach yr of local years {
+    if "`yr'" == "2018" {
+        file write tex " & "
+    }
+    else {
+        file write tex " & " %5.2f (`axi_yoy_rate_pre_`yr'')
+    }
+}
+file write tex " \\" _n
+
+* Post rate
+file write tex "Post (\%)"
+foreach yr of local years {
+    file write tex " & " %5.2f (`axi_`yr'')
+}
+file write tex " \\" _n
+
+* YoY Post
+file write tex "\hspace{1em} YoY \$\Delta\$"
+foreach yr of local years {
+    if "`yr'" == "2018" {
+        file write tex " & "
+    }
+    else {
+        file write tex " & " %5.2f (`axi_yoy_rate_post_`yr'')
+    }
+}
+file write tex " \\" _n
+
+* Transfer Reduction rate
+file write tex "\hspace{1em} Transfer Reduction (\%)"
+foreach yr of local years {
+    file write tex " & " %5.1f (`axi_tr_rate_`yr'')
+}
+file write tex " \\" _n
+
+* Income Shortfall Pre
+file write tex "Income Shortfall Pre (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`axipre_gam_`yr'')
+}
+file write tex " \\" _n
+
+* YoY Gap Pre
+file write tex "\hspace{1em} YoY \$\Delta\$"
+foreach yr of local years {
+    if "`yr'" == "2018" {
+        file write tex " & "
+    }
+    else {
+        file write tex " & " %5.0f (`axi_yoy_gap_pre_`yr'')
+    }
+}
+file write tex " \\" _n
+
+* Income Shortfall Post
+file write tex "Income Shortfall Post (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`axigam_`yr'')
+}
+file write tex " \\" _n
+
+* YoY Gap Post
+file write tex "\hspace{1em} YoY \$\Delta\$"
+foreach yr of local years {
+    if "`yr'" == "2018" {
+        file write tex " & "
+    }
+    else {
+        file write tex " & " %5.0f (`axi_yoy_gap_post_`yr'')
+    }
+}
+file write tex " \\" _n
+
+* Transfer Reduction gap
+file write tex "\hspace{1em} Transfer Reduction (\%)"
+foreach yr of local years {
+    file write tex " & " %5.1f (`axi_tr_gap_`yr'')
+}
+file write tex " \\" _n
+
+file write tex "\hline" _n
+
+*--- Working Poor (IWP Employees) ---
+file write tex "\multicolumn{8}{l}{\textit{Working Poor}} \\" _n
+file write tex "\hline" _n
+
+* Pre rate
+file write tex "Pre (\%)"
+foreach yr of local years {
+    file write tex " & " %5.2f (`iwpepre_`yr'')
+}
+file write tex " \\" _n
+
+* YoY Pre
+file write tex "\hspace{1em} YoY \$\Delta\$"
+foreach yr of local years {
+    if "`yr'" == "2018" {
+        file write tex " & "
+    }
+    else {
+        file write tex " & " %5.2f (`iwpe_yoy_rate_pre_`yr'')
+    }
+}
+file write tex " \\" _n
+
+* Post rate
+file write tex "Post (\%)"
+foreach yr of local years {
+    file write tex " & " %5.2f (`iwpe_`yr'')
+}
+file write tex " \\" _n
+
+* YoY Post
+file write tex "\hspace{1em} YoY \$\Delta\$"
+foreach yr of local years {
+    if "`yr'" == "2018" {
+        file write tex " & "
+    }
+    else {
+        file write tex " & " %5.2f (`iwpe_yoy_rate_post_`yr'')
+    }
+}
+file write tex " \\" _n
+
+* Transfer Reduction rate
+file write tex "\hspace{1em} Transfer Reduction (\%)"
+foreach yr of local years {
+    file write tex " & " %5.1f (`iwpe_tr_rate_`yr'')
+}
+file write tex " \\" _n
+
+* Income Shortfall Pre
+file write tex "Income Shortfall Pre (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`iwpepre_gam_`yr'')
+}
+file write tex " \\" _n
+
+* YoY Gap Pre
+file write tex "\hspace{1em} YoY \$\Delta\$"
+foreach yr of local years {
+    if "`yr'" == "2018" {
+        file write tex " & "
+    }
+    else {
+        file write tex " & " %5.0f (`iwpe_yoy_gap_pre_`yr'')
+    }
+}
+file write tex " \\" _n
+
+* Income Shortfall Post
+file write tex "Income Shortfall Post (\euro{})"
+foreach yr of local years {
+    file write tex " & " %6.0f (`iwpegam_`yr'')
+}
+file write tex " \\" _n
+
+* YoY Gap Post
+file write tex "\hspace{1em} YoY \$\Delta\$"
+foreach yr of local years {
+    if "`yr'" == "2018" {
+        file write tex " & "
+    }
+    else {
+        file write tex " & " %5.0f (`iwpe_yoy_gap_post_`yr'')
+    }
+}
+file write tex " \\" _n
+
+* Transfer Reduction gap
+file write tex "\hspace{1em} Transfer Reduction (\%)"
+foreach yr of local years {
+    file write tex " & " %5.1f (`iwpe_tr_gap_`yr'')
+}
+file write tex " \\" _n
+
+file write tex "\hline" _n
+file write tex "\end{tabular}}" _n
+file write tex "\begin{flushleft}" _n
+file write tex "\footnotesize" _n
+file write tex "Notes: YoY \$\Delta\$ = year-to-year change relative to the previous year. " _n
+file write tex "Transfer Reduction = relative reduction from pre- to post-transfer values. " _n
+file write tex "Income shortfall refers to the average income distance from the poverty threshold (EUR/month). " _n
+file write tex "Source: EU-SILC Austria, own calculations." _n
+file write tex "\end{flushleft}" _n
+file write tex "\end{table}" _n
+
+file close tex
+di "Table 4 saved: $output/table4_poverty_by_year_small.tex"
+
+*===============================================================================
+* Tabel 5
+*===============================================================================
+local years "2018 2019 2020 2021 2022 2023 2024"
+local cuts "0 50 100 200 300 400 500 700 1000"
+local cut_labels `""0--50" "50--100" "100--200" "200--300" "300--400" "400--500" "500--700" "700--1000" "1000+""'
+
+* Monatliche Gap-Variablen erstellen
+gen gap_axi_post_m  = axi_ga / 12  if axi_ga  > 0 & !missing(axi_ga)
+gen gap_iwpe_post_m = iwpe_ga / 12 if iwpe_ga > 0 & !missing(iwpe_ga)
+
+* Brackets berechnen und speichern
+foreach grp in axi iwpe {
+    foreach yr of local years {
+
+        quietly sum dwt if year == `yr' & !missing(gap_`grp'_post_m)
+        local tot_`grp'_`yr' = r(sum)
+
+        * 0-50
+        quietly sum dwt if year==`yr' & gap_`grp'_post_m >= 0   & gap_`grp'_post_m < 50   & !missing(gap_`grp'_post_m)
+        local b1_`grp'_`yr' = r(sum) / `tot_`grp'_`yr'' * 100
+        * 50-100
+        quietly sum dwt if year==`yr' & gap_`grp'_post_m >= 50  & gap_`grp'_post_m < 100  & !missing(gap_`grp'_post_m)
+        local b2_`grp'_`yr' = r(sum) / `tot_`grp'_`yr'' * 100
+        * 100-200
+        quietly sum dwt if year==`yr' & gap_`grp'_post_m >= 100 & gap_`grp'_post_m < 200  & !missing(gap_`grp'_post_m)
+        local b3_`grp'_`yr' = r(sum) / `tot_`grp'_`yr'' * 100
+        * 200-300
+        quietly sum dwt if year==`yr' & gap_`grp'_post_m >= 200 & gap_`grp'_post_m < 300  & !missing(gap_`grp'_post_m)
+        local b4_`grp'_`yr' = r(sum) / `tot_`grp'_`yr'' * 100
+        * 300-400
+        quietly sum dwt if year==`yr' & gap_`grp'_post_m >= 300 & gap_`grp'_post_m < 400  & !missing(gap_`grp'_post_m)
+        local b5_`grp'_`yr' = r(sum) / `tot_`grp'_`yr'' * 100
+        * 400-500
+        quietly sum dwt if year==`yr' & gap_`grp'_post_m >= 400 & gap_`grp'_post_m < 500  & !missing(gap_`grp'_post_m)
+        local b6_`grp'_`yr' = r(sum) / `tot_`grp'_`yr'' * 100
+        * 500-700
+        quietly sum dwt if year==`yr' & gap_`grp'_post_m >= 500 & gap_`grp'_post_m < 700  & !missing(gap_`grp'_post_m)
+        local b7_`grp'_`yr' = r(sum) / `tot_`grp'_`yr'' * 100
+        * 700-1000
+        quietly sum dwt if year==`yr' & gap_`grp'_post_m >= 700 & gap_`grp'_post_m < 1000 & !missing(gap_`grp'_post_m)
+        local b8_`grp'_`yr' = r(sum) / `tot_`grp'_`yr'' * 100
+        * 1000+
+        quietly sum dwt if year==`yr' & gap_`grp'_post_m >= 1000 & !missing(gap_`grp'_post_m)
+        local b9_`grp'_`yr' = r(sum) / `tot_`grp'_`yr'' * 100
+    }
+}
+
+* LaTeX schreiben
+file open tex using "$output/gap_dist_yearly.tex", write replace
+
+file write tex "\begin{table}[H]" _n
+file write tex "\centering" _n
+file write tex "\caption{Distribution of Monthly Income Gap by Year (2018--2024)}" _n
+file write tex "\resizebox{\textwidth}{!}{%" _n
+file write tex "\begin{tabular}{lrrrrrrr}" _n
+file write tex "\hline" _n
+file write tex "Gap (\euro{}/Monat) & 2018 & 2019 & 2020 & 2021 & 2022 & 2023 & 2024 \\" _n
+file write tex "\hline" _n
+
+*--- AROP w/o IWP Post Transfer ---
+file write tex "\multicolumn{8}{l}{\textit{AROP w/o IWP -- Post Transfer}} \\" _n
+file write tex "\hline" _n
+
+forvalues b = 1/9 {
+    if `b' == 1 local label "0--50\,\euro{}"
+    if `b' == 2 local label "50--100\,\euro{}"
+    if `b' == 3 local label "100--200\,\euro{}"
+    if `b' == 4 local label "200--300\,\euro{}"
+    if `b' == 5 local label "300--400\,\euro{}"
+    if `b' == 6 local label "400--500\,\euro{}"
+    if `b' == 7 local label "500--700\,\euro{}"
+    if `b' == 8 local label "700--1000\,\euro{}"
+    if `b' == 9 local label "1000+\,\euro{}"
+
+    file write tex "`label'"
+    foreach yr of local years {
+        file write tex " & " %5.1f (`b`b'_axi_`yr'')
+    }
+    file write tex " \\" _n
+}
+
+file write tex "\hline" _n
+
+*--- IWP Employees Post Transfer ---
+file write tex "\multicolumn{8}{l}{\textit{IWP Employees -- Post Transfer}} \\" _n
+file write tex "\hline" _n
+
+forvalues b = 1/9 {
+    if `b' == 1 local label "0--50\,\euro{}"
+    if `b' == 2 local label "50--100\,\euro{}"
+    if `b' == 3 local label "100--200\,\euro{}"
+    if `b' == 4 local label "200--300\,\euro{}"
+    if `b' == 5 local label "300--400\,\euro{}"
+    if `b' == 6 local label "400--500\,\euro{}"
+    if `b' == 7 local label "500--700\,\euro{}"
+    if `b' == 8 local label "700--1000\,\euro{}"
+    if `b' == 9 local label "1000+\,\euro{}"
+
+    file write tex "`label'"
+    foreach yr of local years {
+        file write tex " & " %5.1f (`b`b'_iwpe_`yr'')
+    }
+    file write tex " \\" _n
+}
+
+file write tex "\hline" _n
+file write tex "\end{tabular}}" _n
+file write tex "\begin{flushleft}" _n
+file write tex "\footnotesize" _n
+file write tex "Notes: Share of poor population within each gap bracket per year. " _n
+file write tex "AROP w/o IWP: at-risk-of-poverty excluding in-work poor. " _n
+file write tex "IWP Employees: in-work poor employees (LES==3). " _n
+file write tex "Post-transfer gaps only. Source: EU-SILC Austria, own calculations." _n
+file write tex "\end{flushleft}" _n
+file write tex "\end{table}" _n
+
+file close tex
+
+* Aufräumen
+drop gap_axi_post_m gap_iwpe_post_m
+
+di "Gap-Verteilungstabelle gespeichert unter: $output/gap_dist_yearly.tex"
