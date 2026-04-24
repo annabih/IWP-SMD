@@ -1,0 +1,165 @@
+*==============================================================================
+* Title: Kinder vs. Erwachsene als Prädiktoren von Armut
+* Outcomes: arop_excl_iwp_pre, arop_excl_iwp, iwp_emp_pre, iwp_emp
+* Modelle je Outcome:
+*   M1: c.n_children
+*   M2: c.n_adults
+*   M3: c.n_children + c.n_adults (horse race, unstandardisiert)
+*   M4: z_children + z_adults     (horse race, standardisiert)
+* -> 4 Outcomes x 4 Modelle = 16 Modelle
+* Prerequisite: Direkt nach doc 8.
+*   n_adults bereits in memory (bysort year hh_id: egen n_adults = total(age >= 14))
+*==============================================================================
+
+*--- Survey weight MIT HH-Clustering ---
+svyset hh_id [pweight=dwt]
+
+*--- Jahreseinschränkung ---
+local yr "inrange(year, 2018, 2024)"
+
+*--- n_adults: bereits in memory aus doc 8, zur Sicherheit pruefen ---
+capture confirm variable n_adults
+if _rc != 0 {
+    gen n_adults = hh_size - n_children
+    label variable n_adults "Number of adults in household"
+    di "n_adults generiert (war nicht in memory)"
+}
+else {
+    di "n_adults bereits in memory (aus doc 8)"
+}
+
+*--- Standardisierte Prädiktoren (nur für M4, nur auf 2018-2024 Subsample) ---
+egen z_children = std(n_children) if `yr'
+egen z_adults   = std(n_adults)   if `yr'
+
+label variable z_children "N children (standardised, 2018-2024)"
+label variable z_adults   "N adults (standardised, 2018-2024)"
+
+*==============================================================================
+* BLOCK 1: AROP w/o IWP - PRE-TRANSFER
+*==============================================================================
+di _n "=== AROP w/o IWP PRE-TRANSFER ==="
+
+svy: logistic arop_excl_iwp_pre c.n_children ib2018.year if `yr'
+est store axi_pre_m1
+
+svy: logistic arop_excl_iwp_pre c.n_adults ib2018.year if `yr'
+est store axi_pre_m2
+
+svy: logistic arop_excl_iwp_pre c.n_children c.n_adults ib2018.year if `yr'
+est store axi_pre_m3
+
+svy: logistic arop_excl_iwp_pre z_children z_adults ib2018.year if `yr'
+est store axi_pre_m4
+
+*==============================================================================
+* BLOCK 2: AROP w/o IWP - POST-TRANSFER
+*==============================================================================
+di _n "=== AROP w/o IWP POST-TRANSFER ==="
+
+svy: logistic arop_excl_iwp c.n_children ib2018.year if `yr'
+est store axi_post_m1
+
+svy: logistic arop_excl_iwp c.n_adults ib2018.year if `yr'
+est store axi_post_m2
+
+svy: logistic arop_excl_iwp c.n_children c.n_adults ib2018.year if `yr'
+est store axi_post_m3
+
+svy: logistic arop_excl_iwp z_children z_adults ib2018.year if `yr'
+est store axi_post_m4
+
+*==============================================================================
+* BLOCK 3: IWP EMPLOYEES - PRE-TRANSFER
+*==============================================================================
+di _n "=== IWP EMPLOYEES PRE-TRANSFER ==="
+
+svy: logistic iwp_emp_pre c.n_children ib2018.year if `yr'
+est store iwp_pre_m1
+
+svy: logistic iwp_emp_pre c.n_adults ib2018.year if `yr'
+est store iwp_pre_m2
+
+svy: logistic iwp_emp_pre c.n_children c.n_adults ib2018.year if `yr'
+est store iwp_pre_m3
+
+svy: logistic iwp_emp_pre z_children z_adults ib2018.year if `yr'
+est store iwp_pre_m4
+
+*==============================================================================
+* BLOCK 4: IWP EMPLOYEES - POST-TRANSFER
+*==============================================================================
+di _n "=== IWP EMPLOYEES POST-TRANSFER ==="
+
+svy: logistic iwp_emp c.n_children ib2018.year if `yr'
+est store iwp_post_m1
+
+svy: logistic iwp_emp c.n_adults ib2018.year if `yr'
+est store iwp_post_m2
+
+svy: logistic iwp_emp c.n_children c.n_adults ib2018.year if `yr'
+est store iwp_post_m3
+
+svy: logistic iwp_emp z_children z_adults ib2018.year if `yr'
+est store iwp_post_m4
+
+*==============================================================================
+* KONSOLE: ODDS RATIOS
+*==============================================================================
+di _n "=== OR - AROP w/o IWP PRE ==="
+esttab axi_pre_m1 axi_pre_m2 axi_pre_m3 axi_pre_m4, eform ci nostar drop(*.year _cons) title("AROP w/o IWP pre") note("M1-M3: unstd. OR pro Person. M4: std. OR (1 SD). Ref Jahr: 2018.")
+
+di _n "=== OR - AROP w/o IWP POST ==="
+esttab axi_post_m1 axi_post_m2 axi_post_m3 axi_post_m4, eform ci nostar drop(*.year _cons) title("AROP w/o IWP post") note("M1-M3: unstd. OR pro Person. M4: std. OR (1 SD). Ref Jahr: 2018.")
+
+di _n "=== OR - IWP EMPLOYEES PRE ==="
+esttab iwp_pre_m1 iwp_pre_m2 iwp_pre_m3 iwp_pre_m4, eform ci nostar drop(*.year _cons) title("IWP Employees pre") note("M1-M3: unstd. OR pro Person. M4: std. OR (1 SD). Ref Jahr: 2018.")
+
+di _n "=== OR - IWP EMPLOYEES POST ==="
+esttab iwp_post_m1 iwp_post_m2 iwp_post_m3 iwp_post_m4, eform ci nostar drop(*.year _cons) title("IWP Employees post") note("M1-M3: unstd. OR pro Person. M4: std. OR (1 SD). Ref Jahr: 2018.")
+
+*==============================================================================
+* AMEs - M3 (unstandardisiert) & M4 (standardisiert)
+*==============================================================================
+di _n "=== AMEs M3 (unstd.) - AROP w/o IWP pre ==="
+est restore axi_pre_m3
+margins, dydx(n_children n_adults)
+
+di _n "=== AMEs M3 (unstd.) - AROP w/o IWP post ==="
+est restore axi_post_m3
+margins, dydx(n_children n_adults)
+
+di _n "=== AMEs M3 (unstd.) - IWP Employees pre ==="
+est restore iwp_pre_m3
+margins, dydx(n_children n_adults)
+
+di _n "=== AMEs M3 (unstd.) - IWP Employees post ==="
+est restore iwp_post_m3
+margins, dydx(n_children n_adults)
+
+di _n "=== AMEs M4 (std.) - AROP w/o IWP pre ==="
+est restore axi_pre_m4
+margins, dydx(z_children z_adults)
+
+di _n "=== AMEs M4 (std.) - AROP w/o IWP post ==="
+est restore axi_post_m4
+margins, dydx(z_children z_adults)
+
+di _n "=== AMEs M4 (std.) - IWP Employees pre ==="
+est restore iwp_pre_m4
+margins, dydx(z_children z_adults)
+
+di _n "=== AMEs M4 (std.) - IWP Employees post ==="
+est restore iwp_post_m4
+margins, dydx(z_children z_adults)
+
+*==============================================================================
+* EXPORT
+*==============================================================================
+esttab axi_pre_m1 axi_pre_m2 axi_pre_m3 axi_pre_m4 axi_post_m1 axi_post_m2 axi_post_m3 axi_post_m4 using "$output/Regression_AXI_Children_Adults.csv", eform ci nostar replace drop(*.year _cons) title("AROP w/o IWP: Kinder vs. Erwachsene, 2018-2024") note("M1-M3: unstd. M4: std. Ref: 2018. svyset hh_id.")
+
+esttab iwp_pre_m1 iwp_pre_m2 iwp_pre_m3 iwp_pre_m4 iwp_post_m1 iwp_post_m2 iwp_post_m3 iwp_post_m4 using "$output/Regression_IWP_Children_Adults.csv", eform ci nostar replace drop(*.year _cons) title("IWP Employees: Kinder vs. Erwachsene, 2018-2024") note("M1-M3: unstd. M4: std. Ref: 2018. svyset hh_id.")
+
+di as result "=== FERTIG ==="
+di "  $output/Regression_AXI_Children_Adults.csv"
+di "  $output/Regression_IWP_Children_Adults.csv"
