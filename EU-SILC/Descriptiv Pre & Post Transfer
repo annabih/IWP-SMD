@@ -15,8 +15,8 @@ clear all
 set more off
 
 *--- Pfade --------------------------------------------------------------------
-global output  "D:\InWorkPoverty_SILC"     // wie im Haupt-Do-File (enthaelt die .dta)
-global descout "D:\InWorkPoverty_SILC"     // Zielordner fuer die .txt
+global output  "D:\InWorkPoverty_SILC"    
+global descout "D:\InWorkPoverty_SILC"
 
 *--- Daten laden (gespeicherte Mikrodatei aus dem Haupt-Do-File) --------------
 capture confirm file "$output/ALL_POV_IND_SILC_PrePost_HH.dta"
