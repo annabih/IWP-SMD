@@ -6,9 +6,9 @@
 *   3. Fehlende HH-Typen (z.B. HH3 mit wenig Fällen) werden sauber übersprungen
 *===============================================================================
 
-use "D:\Data\AT_CROSS\SILC_CrossSec_AllYears_2015_2024.dta", clear
+use "Y:\Desktop\USB\18.05.2026\Data\AT_CROSS\SILC_CrossSec_AllYears_2015_2024.dta", clear
 
-global output "D:\InWorkPoverty_SILC"
+global output "Y:\Desktop\USB\SMSD"
 
 foreach var in HX090 RB050 RX010 PL073 PL074 PL075 PL076 year PL040 PL040A PD020 PD030 PD050 PD060 PD070 PD080 HS040 HS050 HS060 HS011 HS021 HS031 HH050 RX060 {
     capture confirm string variable `var'
