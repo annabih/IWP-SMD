@@ -1,0 +1,194 @@
+*******************************************************************************************************************************************************************************************
+*** Title: HH incomes, poverty thresholds, poverty labels (MA-II logic on EU-SILC)
+*** Replaces: "HH Incomes, Poverty Thresholds, Poverty label"
+*** Aim: Equivalised pre/post-transfer income, relative threshold, in-work poverty, AROP w/o IWP, gaps, euro bands, SMD groups
+*** Changes vs. MA-II:
+***   - Income from UDB household variables instead of EUROMOD income lists
+***     post = HY020 / HX050, pre = HY022 / HX050 (before social transfers other than old-age and survivor benefits)
+***   - UDB incomes are annual -> divided by 12 so that all amounts are monthly (as in EUROMOD output)
+***   - No anchored threshold and no threshold effects (no policy scenario on EU-SILC)
+***   - AROP w/o IWP = poor and not working >= 7 months in any status (any_worker == 0), all ages
+***   - SMD groups: both 18-64, old-age benefit recipients excluded
+*******************************************************************************************************************************************************************************************
+clear all
+set more off
+
+
+use "Y:/Desktop/USB/SMSD_Paper/SILC_All_Years_Prepared.dta", clear
+
+********************************************************************************
+* Equivalised household income (monthly)
+* HY020 / HY022 are household totals and must be equivalised with HX050
+* Both bounded at 0 (negative incomes -> 0), so gaps in % are comparable pre/post
+* max() returns 0 for missing arguments -> guarded by if conditions
+********************************************************************************
+
+gen double post_disp_hh_income_equ = max((HY020 / HX050) / 12, 0) if !missing(HY020, HX050) & HX050 > 0
+gen double pre_disp_hh_income_equ = max((HY022 / HX050) / 12, 0) if !missing(HY022, HX050) & HX050 > 0
+
+label variable post_disp_hh_income_equ "Post-transfer disposable household income, equalised, monthly (HY020/HX050)"
+label variable pre_disp_hh_income_equ "Pre-transfer disposable household income, equalised, monthly, pensions included (HY022/HX050)"
+
+* Check against official equivalised disposable income HX090
+gen double check_hx090 = post_disp_hh_income_equ - HX090 / 12
+di _n "=== Check: HY020/HX050 minus HX090 (monthly) ===" _n
+sum check_hx090, detail
+drop check_hx090
+
+********************************************************************************
+* Relative poverty threshold: 60% of weighted median, by year
+********************************************************************************
+
+gen double poverty_threshold_rel = .
+
+levelsof year, local(years)
+
+foreach y of local years {
+    quietly _pctile post_disp_hh_income_equ [aw=dwt] if year == `y' & dwt > 0 & !missing(post_disp_hh_income_equ, dwt), p(50)
+    replace poverty_threshold_rel = r(r1) * 0.6 if year == `y'
+}
+
+label variable poverty_threshold_rel "Relative poverty threshold: 60% median by year, monthly"
+
+di _n "=== Monthly poverty thresholds ===" _n
+table year, statistic(mean poverty_threshold_rel) nototals nformat(%12.2fc mean)
+
+********************************************************************************
+* In-work poverty indicators (employed = employee >= 7 months, age 18-64)
+********************************************************************************
+
+gen byte iw_arop_pre_rel = pre_disp_hh_income_equ < poverty_threshold_rel if employed == 1 & !missing(pre_disp_hh_income_equ, poverty_threshold_rel)
+gen byte iw_poor_post_rel = post_disp_hh_income_equ < poverty_threshold_rel if employed == 1 & !missing(post_disp_hh_income_equ, poverty_threshold_rel)
+
+label variable iw_arop_pre_rel "Below relative poverty threshold, pre-transfer income"
+label variable iw_poor_post_rel "Below relative poverty threshold, post-transfer income"
+
+gen byte diff_rel = iw_arop_pre_rel - iw_poor_post_rel if employed == 1
+label variable diff_rel "Difference pre - post, relative threshold"
+
+* Sanity check: post >= pre for (almost) everyone, so diff_rel should not be negative
+tab diff_rel if employed == 1, missing
+
+********************************************************************************
+* AROP indicators, total population
+********************************************************************************
+
+gen byte arop_pre_rel = pre_disp_hh_income_equ < poverty_threshold_rel if !missing(pre_disp_hh_income_equ, poverty_threshold_rel)
+gen byte arop_post_rel = post_disp_hh_income_equ < poverty_threshold_rel if !missing(post_disp_hh_income_equ, poverty_threshold_rel)
+
+label variable arop_pre_rel "AROP total pop, pre-transfer, relative threshold"
+label variable arop_post_rel "AROP total pop, post-transfer, relative threshold"
+
+gen byte arop_diff_rel = arop_pre_rel - arop_post_rel
+label variable arop_diff_rel "AROP diff pre - post, relative threshold"
+
+* Check own AROP flag against official poverty indicator HX080
+di _n "=== Check: own AROP post vs. HX080 ===" _n
+tab arop_post_rel HX080 if !missing(HX080), missing
+
+********************************************************************************
+* AROP without IWP = not working >= 7 months in any status, below threshold
+* All ages (general descriptives); restricted to 18-64 only for the SMD comparison
+* Poor self-employed workers are in neither group
+********************************************************************************
+
+gen byte axi_pre_rel = pre_disp_hh_income_equ < poverty_threshold_rel if any_worker == 0 & !missing(pre_disp_hh_income_equ, poverty_threshold_rel)
+gen byte axi_post_rel = post_disp_hh_income_equ < poverty_threshold_rel if any_worker == 0 & !missing(post_disp_hh_income_equ, poverty_threshold_rel)
+
+label variable axi_pre_rel "AROP w/o IWP (not working, all ages), pre-transfer, relative threshold"
+label variable axi_post_rel "AROP w/o IWP (not working, all ages), post-transfer, relative threshold"
+
+gen byte axi_diff_rel = axi_pre_rel - axi_post_rel
+label variable axi_diff_rel "AROP w/o IWP diff pre - post, relative threshold"
+
+********************************************************************************
+* 1. Gap only among poor persons (monthly EUR, positive = below threshold)
+********************************************************************************
+
+gen double gap_pre_rel = poverty_threshold_rel - pre_disp_hh_income_equ if employed == 1 & iw_arop_pre_rel == 1 & !missing(pre_disp_hh_income_equ, poverty_threshold_rel)
+gen double gap_post_rel = poverty_threshold_rel - post_disp_hh_income_equ if employed == 1 & iw_poor_post_rel == 1 & !missing(post_disp_hh_income_equ, poverty_threshold_rel)
+
+gen double gap_axi_pre_rel = poverty_threshold_rel - pre_disp_hh_income_equ if axi_pre_rel == 1 & !missing(pre_disp_hh_income_equ, poverty_threshold_rel)
+gen double gap_axi_post_rel = poverty_threshold_rel - post_disp_hh_income_equ if axi_post_rel == 1 & !missing(post_disp_hh_income_equ, poverty_threshold_rel)
+
+********************************************************************************
+* 2. Gap over all employed persons (non-poor employed = 0)
+********************************************************************************
+
+gen double gap_pre_rel_all = max(poverty_threshold_rel - pre_disp_hh_income_equ, 0) if employed == 1 & !missing(pre_disp_hh_income_equ, poverty_threshold_rel)
+gen double gap_post_rel_all = max(poverty_threshold_rel - post_disp_hh_income_equ, 0) if employed == 1 & !missing(post_disp_hh_income_equ, poverty_threshold_rel)
+
+********************************************************************************
+* 3. Poverty gap as percentage of threshold
+********************************************************************************
+
+gen double gap_pre_rel_pct = 100 * gap_pre_rel / poverty_threshold_rel
+gen double gap_post_rel_pct = 100 * gap_post_rel / poverty_threshold_rel
+
+gen double gap_pre_rel_all_pct = 100 * gap_pre_rel_all / poverty_threshold_rel
+gen double gap_post_rel_all_pct = 100 * gap_post_rel_all / poverty_threshold_rel
+
+gen double gap_axi_pre_rel_pct = 100 * gap_axi_pre_rel / poverty_threshold_rel
+gen double gap_axi_post_rel_pct = 100 * gap_axi_post_rel / poverty_threshold_rel
+
+********************************************************************************
+* Labels
+********************************************************************************
+
+label variable gap_pre_rel "Poverty gap among poor employed, pre-transfer, relative threshold"
+label variable gap_post_rel "Poverty gap among poor employed, post-transfer, relative threshold"
+label variable gap_axi_pre_rel "Poverty gap among AROP w/o IWP, pre-transfer, relative threshold"
+label variable gap_axi_post_rel "Poverty gap among AROP w/o IWP, post-transfer, relative threshold"
+
+label variable gap_pre_rel_all "Poverty gap all employed, pre-transfer, relative threshold"
+label variable gap_post_rel_all "Poverty gap all employed, post-transfer, relative threshold"
+
+label variable gap_pre_rel_pct "Poverty gap among poor employed in %, pre-transfer"
+label variable gap_post_rel_pct "Poverty gap among poor employed in %, post-transfer"
+label variable gap_pre_rel_all_pct "Poverty gap all employed in %, pre-transfer"
+label variable gap_post_rel_all_pct "Poverty gap all employed in %, post-transfer"
+label variable gap_axi_pre_rel_pct "Poverty gap among AROP w/o IWP in %, pre-transfer"
+label variable gap_axi_post_rel_pct "Poverty gap among AROP w/o IWP in %, post-transfer"
+
+********************************************************************************
+* Euro bands below the threshold (monthly EUR, nominal)
+* Bands: (0,100], (100,250], (250,500], (500,750], (750,1000], >1000
+********************************************************************************
+
+label define bandlbl 1 "(0,100]" 2 "(100,250]" 3 "(250,500]" 4 "(500,750]" 5 "(750,1000]" 6 ">1000"
+
+foreach g in pre_rel post_rel axi_pre_rel axi_post_rel {
+    gen byte band_`g' = .
+    replace band_`g' = 1 if gap_`g' > 0 & gap_`g' <= 100 & !missing(gap_`g')
+    replace band_`g' = 2 if gap_`g' > 100 & gap_`g' <= 250 & !missing(gap_`g')
+    replace band_`g' = 3 if gap_`g' > 250 & gap_`g' <= 500 & !missing(gap_`g')
+    replace band_`g' = 4 if gap_`g' > 500 & gap_`g' <= 750 & !missing(gap_`g')
+    replace band_`g' = 5 if gap_`g' > 750 & gap_`g' <= 1000 & !missing(gap_`g')
+    replace band_`g' = 6 if gap_`g' > 1000 & !missing(gap_`g')
+    label values band_`g' bandlbl
+    label variable band_`g' "Euro distance below threshold, `g'"
+    gen byte pct_b1_`g' = 100 * (band_`g' == 1) if !missing(band_`g')
+    gen byte pct_b2_`g' = 100 * (band_`g' == 2) if !missing(band_`g')
+    gen byte pct_b3_`g' = 100 * (band_`g' == 3) if !missing(band_`g')
+    gen byte pct_b4_`g' = 100 * (band_`g' == 4) if !missing(band_`g')
+    gen byte pct_b5_`g' = 100 * (band_`g' == 5) if !missing(band_`g')
+    gen byte pct_b6_`g' = 100 * (band_`g' == 6) if !missing(band_`g')
+}
+
+********************************************************************************
+* SMD comparison groups (post-transfer)
+* Both 18-64, old-age benefit recipients (PY100G > 0) excluded
+* 1 = IWP Employees, 0 = AROP w/o IWP
+********************************************************************************
+
+gen byte smd_grp = .
+replace smd_grp = 1 if employed == 1 & iw_poor_post_rel == 1 & oldage_ben == 0
+replace smd_grp = 0 if axi_post_rel == 1 & inrange(dag, 18, 64) & oldage_ben == 0
+
+label define smdgrp 0 "AROP w/o IWP (18-64, no old-age pension)" 1 "IWP Employees (18-64, no old-age pension)"
+label values smd_grp smdgrp
+label variable smd_grp "SMD comparison group, post-transfer"
+
+tab year smd_grp, missing
+
+save "Y:/Desktop/USB/SMSD_Paper/SILC_All_Years_Adjusted.dta", replace
